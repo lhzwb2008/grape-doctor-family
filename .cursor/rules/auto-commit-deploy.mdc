@@ -1,0 +1,17 @@
+---
+description: 改完代码后自动 git 提交并部署到 AItest-linux2
+alwaysApply: true
+---
+
+# 自动提交与部署
+
+每次完成代码修改后（功能/修复/配置等落地改动），按顺序执行：
+
+1. **Git 提交**：按仓库既有风格写简洁 commit message；勿提交 `.env`、`.deploy.secret` 等密钥文件；提交后 `git push origin HEAD`。
+2. **部署到 AItest-linux2**：`101.201.237.149`，用户 `root`，远程目录 `/opt/grape-doctor`，端口 `8765`。
+3. 部署命令：从项目根目录执行  
+   `SSHPASS="$(cat .deploy.secret 2>/dev/null || true)" ./scripts/deploy.sh`  
+   若 `.deploy.secret` 不存在，用会话中用户提供的密码设置 `SSHPASS` 再跑 `./scripts/deploy.sh`。
+4. 部署成功后回报访问地址：`http://101.201.237.149:8765`。
+
+纯讨论、未改文件时不要提交或部署。

@@ -27,6 +27,8 @@ from backend.cursor_client import (
     model_id,
     run_with_stream,
 )
+from backend.dashscope_voice import recognize as asr_recognize
+from backend.dashscope_voice import synthesize as tts_synthesize
 
 ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(ROOT / ".env")
@@ -105,6 +107,15 @@ class ChatBody(BaseModel):
 
 class SessionCreateBody(BaseModel):
     title: str = "新对话"
+
+
+class AsrBody(BaseModel):
+    audio: str = Field(min_length=1)  # base64 或 data URL
+    mime: str = Field(default="audio/webm", max_length=100)
+
+
+class TtsBody(BaseModel):
+    text: str = Field(min_length=1, max_length=4000)
 
 
 def _strip_b64(data: str) -> str:
@@ -217,6 +228,39 @@ def delete_session(session_id: str, authorization: str | None = Header(default=N
     except FileNotFoundError as e:
         raise HTTPException(404, str(e)) from e
     return {"ok": True}
+
+
+@app.post("/api/asr")
+def asr(body: AsrBody, authorization: str | None = Header(default=None)):
+    _auth_user(authorization)
+    raw_b64 = _strip_b64(body.audio).strip()
+    try:
+        raw = base64.b64decode(raw_b64, validate=False)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(400, "音频解码失败") from e
+    mime = (body.mime or "audio/webm").split(";")[0].strip() or "audio/webm"
+    try:
+        text = asr_recognize(raw, mime)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(502, f"语音识别失败：{e}") from e
+    return {"text": text}
+
+
+@app.post("/api/tts")
+def tts(body: TtsBody, authorization: str | None = Header(default=None)):
+    _auth_user(authorization)
+    try:
+        audio, mime = tts_synthesize(body.text)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(502, f"语音合成失败：{e}") from e
+    return {
+        "mime": mime,
+        "audio": base64.b64encode(audio).decode("ascii"),
+    }
 
 
 @app.post("/api/sessions/{session_id}/chat")

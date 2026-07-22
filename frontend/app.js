@@ -7,6 +7,8 @@ const state = {
   currentId: null,
   sending: false,
   attachments: [], // { id, name, mime, data, previewUrl?, kind }
+  recording: false,
+  asrBusy: false,
 };
 
 const MAX_ATTACH = 5;
@@ -35,7 +37,13 @@ const sidebar = $("#sidebar");
 const sidebarMask = $("#sidebar-mask");
 const menuBtn = $("#menu-btn");
 const sidebarClose = $("#sidebar-close");
+const micBtn = $("#mic-btn");
+const voiceHint = $("#voice-hint");
 
+let mediaRecorder = null;
+let mediaStream = null;
+let recordChunks = [];
+let currentAudio = null;
 function openSidebar() {
   sidebar?.classList.add("open");
   sidebarMask?.classList.add("show");
@@ -68,6 +76,8 @@ function renderMarkdown(text) {
 }
 
 function setBubbleContent(el, text, { markdown = false, streaming = false } = {}) {
+  el.dataset.rawText = text || "";
+  const ttsBtn = el.querySelector(".btn-tts");
   if (markdown && el.classList.contains("assistant")) {
     el.innerHTML = `<div class="md">${renderMarkdown(text)}</div>`;
   } else {
@@ -75,7 +85,206 @@ function setBubbleContent(el, text, { markdown = false, streaming = false } = {}
   }
   if (streaming) el.classList.add("streaming");
   else el.classList.remove("streaming");
+  if (ttsBtn && el.classList.contains("assistant") && !streaming) {
+    el.appendChild(ttsBtn);
+  } else if (el.classList.contains("assistant") && !streaming && text) {
+    attachTtsButton(el);
+  }
 }
+
+function attachTtsButton(bubble) {
+  if (!bubble || !bubble.classList.contains("assistant")) return;
+  if (bubble.querySelector(".btn-tts")) return;
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "btn-tts tap";
+  btn.title = "朗读回复";
+  btn.setAttribute("aria-label", "朗读回复");
+  btn.textContent = "🔊";
+  btn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    playTts(bubble, btn);
+  });
+  bubble.appendChild(btn);
+}
+
+function stopCurrentAudio() {
+  if (currentAudio) {
+    currentAudio.pause();
+    currentAudio = null;
+  }
+  document.querySelectorAll(".btn-tts.playing").forEach((b) => {
+    b.classList.remove("playing");
+    b.textContent = "🔊";
+  });
+}
+
+async function playTts(bubble, btn) {
+  const text = (bubble.dataset.rawText || bubble.textContent || "").trim();
+  if (!text || text.startsWith("抱歉") || text === "（无回复）") return;
+
+  if (btn.classList.contains("playing") && currentAudio) {
+    stopCurrentAudio();
+    return;
+  }
+
+  stopCurrentAudio();
+  btn.classList.add("loading");
+  btn.textContent = "…";
+  try {
+    let audioUrl = bubble.dataset.ttsUrl;
+    if (!audioUrl) {
+      const data = await api("/api/tts", {
+        method: "POST",
+        body: JSON.stringify({ text }),
+      });
+      audioUrl = `data:${data.mime || "audio/mpeg"};base64,${data.audio}`;
+      bubble.dataset.ttsUrl = audioUrl;
+    }
+    const audio = new Audio(audioUrl);
+    currentAudio = audio;
+    btn.classList.remove("loading");
+    btn.classList.add("playing");
+    btn.textContent = "⏸";
+    audio.onended = () => {
+      if (currentAudio === audio) currentAudio = null;
+      btn.classList.remove("playing");
+      btn.textContent = "🔊";
+    };
+    audio.onerror = () => {
+      stopCurrentAudio();
+      alert("语音播放失败");
+    };
+    await audio.play();
+  } catch (err) {
+    btn.classList.remove("loading", "playing");
+    btn.textContent = "🔊";
+    alert(err.message || "语音合成失败");
+  }
+}
+
+function blobToBase64(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ""));
+    reader.onerror = () => reject(new Error("音频读取失败"));
+    reader.readAsDataURL(blob);
+  });
+}
+
+function pickRecorderMime() {
+  const candidates = [
+    "audio/webm;codecs=opus",
+    "audio/webm",
+    "audio/mp4",
+    "audio/ogg;codecs=opus",
+  ];
+  for (const m of candidates) {
+    if (window.MediaRecorder && MediaRecorder.isTypeSupported(m)) return m;
+  }
+  return "";
+}
+
+function setRecordingUi(on) {
+  state.recording = on;
+  micBtn?.classList.toggle("recording", on);
+  if (voiceHint) {
+    voiceHint.classList.toggle("hidden", !on);
+    voiceHint.textContent = on ? "正在听你说… 再点一下结束" : "";
+  }
+}
+
+async function startRecording() {
+  if (state.sending || state.asrBusy || state.recording) return;
+  if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder) {
+    alert("当前浏览器不支持录音");
+    return;
+  }
+  try {
+    mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch {
+    alert("无法使用麦克风，请检查权限设置");
+    return;
+  }
+  recordChunks = [];
+  const mime = pickRecorderMime();
+  try {
+    mediaRecorder = mime
+      ? new MediaRecorder(mediaStream, { mimeType: mime })
+      : new MediaRecorder(mediaStream);
+  } catch {
+    mediaStream.getTracks().forEach((t) => t.stop());
+    mediaStream = null;
+    alert("无法开始录音");
+    return;
+  }
+  mediaRecorder.ondataavailable = (e) => {
+    if (e.data && e.data.size > 0) recordChunks.push(e.data);
+  };
+  mediaRecorder.onstop = async () => {
+    const mimeType = mediaRecorder?.mimeType || mime || "audio/webm";
+    mediaStream?.getTracks().forEach((t) => t.stop());
+    mediaStream = null;
+    mediaRecorder = null;
+    setRecordingUi(false);
+    if (!recordChunks.length) return;
+    const blob = new Blob(recordChunks, { type: mimeType });
+    recordChunks = [];
+    await transcribeAudio(blob, mimeType);
+  };
+  mediaRecorder.start();
+  setRecordingUi(true);
+}
+
+function stopRecording() {
+  if (!mediaRecorder || mediaRecorder.state === "inactive") {
+    setRecordingUi(false);
+    return;
+  }
+  mediaRecorder.stop();
+}
+
+async function transcribeAudio(blob, mimeType) {
+  state.asrBusy = true;
+  micBtn?.classList.add("busy");
+  if (voiceHint) {
+    voiceHint.classList.remove("hidden");
+    voiceHint.textContent = "正在识别语音…";
+  }
+  try {
+    const dataUrl = await blobToBase64(blob);
+    const data = await api("/api/asr", {
+      method: "POST",
+      body: JSON.stringify({
+        audio: dataUrl,
+        mime: (mimeType || "audio/webm").split(";")[0],
+      }),
+    });
+    const text = (data.text || "").trim();
+    if (!text) {
+      alert("没有听清，请再说一次");
+      return;
+    }
+    const cur = inputEl.value.trim();
+    inputEl.value = cur ? `${cur}${text}` : text;
+    inputEl.style.height = "auto";
+    inputEl.style.height = Math.min(inputEl.scrollHeight, 160) + "px";
+    updateSendState();
+    inputEl.focus();
+  } catch (err) {
+    alert(err.message || "语音识别失败");
+  } finally {
+    state.asrBusy = false;
+    micBtn?.classList.remove("busy");
+    if (voiceHint) voiceHint.classList.add("hidden");
+  }
+}
+
+micBtn?.addEventListener("click", () => {
+  if (state.asrBusy) return;
+  if (state.recording) stopRecording();
+  else startRecording();
+});
 
 async function api(path, options = {}) {
   const headers = { ...(options.headers || {}) };
@@ -325,6 +534,7 @@ function appendBubble(role, content, { markdown = false, streaming = false, prev
   if (role === "assistant" && (markdown || streaming)) {
     setBubbleContent(el, content, { markdown: true, streaming });
   } else {
+    el.dataset.rawText = content || "";
     el.textContent = content;
   }
   if (role === "user" && previews.length) {
@@ -344,6 +554,9 @@ function appendBubble(role, content, { markdown = false, streaming = false, prev
       }
     }
     el.appendChild(box);
+  }
+  if (role === "assistant" && !streaming && content) {
+    attachTtsButton(el);
   }
   messagesEl.appendChild(el);
   scrollBottom();

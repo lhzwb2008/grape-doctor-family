@@ -14,11 +14,11 @@ if [[ -z "${SSHPASS:-}" ]]; then
   exit 1
 fi
 
-RSYNC=(sshpass -e rsync -avz)
+RSYNC=(sshpass -e rsync -avz -e "ssh -o StrictHostKeyChecking=accept-new")
 SSH=(sshpass -e ssh -o StrictHostKeyChecking=accept-new)
 
-echo "==> 检查远程端口 ${PORT}…"
-"${SSH[@]}" "${USER}@${HOST}" "ss -tlnp | grep -q ':${PORT} ' && { echo '端口已被占用'; ss -tlnp; exit 1; } || echo '端口可用'"
+echo "==> 停止远程服务（如已运行）…"
+"${SSH[@]}" "${USER}@${HOST}" "systemctl stop grape-doctor 2>/dev/null || true"
 
 echo "==> 同步代码到 ${REMOTE_DIR}…"
 "${RSYNC[@]}" --delete \
@@ -28,6 +28,8 @@ echo "==> 同步代码到 ${REMOTE_DIR}…"
   --exclude '.git' \
   --exclude '*.pyc' \
   --exclude '.DS_Store' \
+  --exclude '.cursor' \
+  --exclude '.deploy.secret' \
   "${ROOT}/" "${USER}@${HOST}:${REMOTE_DIR}/"
 
 echo "==> 远程安装并启动 systemd 服务…"
