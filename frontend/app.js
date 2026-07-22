@@ -31,6 +31,26 @@ const chatTitle = $("#chat-title");
 const deleteBtn = $("#delete-session-btn");
 const fileInput = $("#file-input");
 const attachPreview = $("#attach-preview");
+const sidebar = $("#sidebar");
+const sidebarMask = $("#sidebar-mask");
+const menuBtn = $("#menu-btn");
+const sidebarClose = $("#sidebar-close");
+
+function openSidebar() {
+  sidebar?.classList.add("open");
+  sidebarMask?.classList.add("show");
+  if (sidebarMask) sidebarMask.hidden = false;
+}
+
+function closeSidebar() {
+  sidebar?.classList.remove("open");
+  sidebarMask?.classList.remove("show");
+  if (sidebarMask) sidebarMask.hidden = true;
+}
+
+menuBtn?.addEventListener("click", openSidebar);
+sidebarClose?.addEventListener("click", closeSidebar);
+sidebarMask?.addEventListener("click", closeSidebar);
 
 if (window.marked) {
   marked.setOptions({ breaks: true, gfm: true });
@@ -215,7 +235,10 @@ function renderSessions() {
         <div class="time">${fmtTime(s.updated_at)}</div>
       </div>
       <button class="del" title="删除" type="button">✕</button>`;
-    row.querySelector(".meta").addEventListener("click", () => openSession(s.id));
+    row.querySelector(".meta").addEventListener("click", () => {
+      openSession(s.id);
+      closeSidebar();
+    });
     row.querySelector(".del").addEventListener("click", (e) => {
       e.stopPropagation();
       deleteSession(s.id);
@@ -256,7 +279,10 @@ async function deleteSession(id) {
   }
 }
 
-$("#new-session-btn").addEventListener("click", () => createSession());
+$("#new-session-btn").addEventListener("click", () => {
+  createSession();
+  closeSidebar();
+});
 deleteBtn.addEventListener("click", () => {
   if (state.currentId) deleteSession(state.currentId);
 });

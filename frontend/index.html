@@ -2,12 +2,13 @@
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+  <meta name="format-detection" content="telephone=no" />
   <title>葡萄个人助手家庭版</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;500;600;700;800&family=Noto+Sans+SC:wght@400;500;700&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/static/styles.css?v=5" />
+  <link rel="stylesheet" href="/static/styles.css?v=6" />
   <script src="https://cdn.jsdelivr.net/npm/marked@15.0.7/marked.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/dompurify@3.2.4/dist/purify.min.js"></script>
 </head>
@@ -46,7 +47,8 @@
   </section>
 
   <section id="chat-view" class="view chat-view hidden">
-    <aside class="sidebar">
+    <div id="sidebar-mask" class="sidebar-mask" hidden></div>
+    <aside class="sidebar" id="sidebar">
       <div class="side-brand">
         <div class="brand-mark sm" aria-hidden="true">
           <span class="grape-core"></span>
@@ -56,6 +58,7 @@
           <div class="side-title">葡萄助手</div>
           <div class="side-user" id="side-user"></div>
         </div>
+        <button type="button" class="btn-side-close" id="sidebar-close" aria-label="关闭菜单">✕</button>
       </div>
       <button class="btn-new" id="new-session-btn">＋ 新对话</button>
       <div class="session-list" id="session-list"></div>
@@ -64,11 +67,12 @@
 
     <main class="chat-main">
       <header class="chat-top">
-        <div>
+        <button type="button" class="btn-menu" id="menu-btn" aria-label="打开菜单">☰</button>
+        <div class="chat-top-text">
           <h2 id="chat-title">新对话</h2>
           <p class="model-tag">Cursor Cloud · grok-4.5</p>
         </div>
-        <button class="btn-icon danger hidden" id="delete-session-btn" title="删除当前对话">删除对话</button>
+        <button class="btn-icon danger hidden" id="delete-session-btn" title="删除当前对话">删除</button>
       </header>
 
       <div class="messages" id="messages">
@@ -99,6 +103,6 @@
     </main>
   </section>
 
-  <script src="/static/app.js?v=5"></script>
+  <script src="/static/app.js?v=6"></script>
 </body>
 </html>
