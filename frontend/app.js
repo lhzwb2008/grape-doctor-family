@@ -60,6 +60,8 @@ let wavBuffers = [];
 let wavSampleRate = 16000;
 let holdStartY = 0;
 let holdPointerId = null;
+let recSession = 0; // 用于取消尚未完成的异步启动，避免遮罩卡住
+let holding = false;
 function openSidebar() {
   sidebar?.classList.add("open");
   sidebarMask?.classList.add("show");
@@ -271,22 +273,31 @@ function setVoiceMode(on) {
   if (modeBtn) {
     modeBtn.textContent = state.voiceMode ? "⌨️" : "🎤";
     modeBtn.title = state.voiceMode ? "切换文字输入" : "切换语音输入";
+    modeBtn.setAttribute("aria-label", modeBtn.title);
   }
+  document.querySelector(".composer")?.classList.toggle("voice-mode", state.voiceMode);
   updateSendState();
 }
 
-function setRecordingUi(on, { canceling = false } = {}) {
-  state.recording = on;
-  holdBtn?.classList.toggle("recording", on);
-  holdBtn?.classList.toggle("canceling", canceling);
-  voiceOverlay?.classList.toggle("hidden", !on);
+function setRecordingUi(on, { canceling = false, recognizing = false } = {}) {
+  state.recording = !!on && !recognizing;
+  holdBtn?.classList.toggle("recording", on && !canceling && !recognizing);
+  holdBtn?.classList.toggle("canceling", on && canceling);
+  holdBtn?.classList.toggle("busy", recognizing);
+  voiceOverlay?.classList.toggle("hidden", !on && !recognizing);
   voiceOverlay?.classList.toggle("canceling", canceling);
+  voiceOverlay?.classList.toggle("recognizing", recognizing);
   if (voiceHint) {
-    if (!on) voiceHint.textContent = "松开发送，上滑取消";
+    if (recognizing) voiceHint.textContent = "正在识别…";
+    else if (!on) voiceHint.textContent = "松开发送，上滑取消";
     else if (canceling) voiceHint.textContent = "松开手指，取消发送";
     else voiceHint.textContent = "松开发送，上滑取消";
   }
-  if (holdBtn) holdBtn.textContent = on ? (canceling ? "松开 取消" : "松开 结束") : "按住 说话";
+  if (holdBtn) {
+    if (recognizing) holdBtn.textContent = "识别中…";
+    else if (!on) holdBtn.textContent = "按住 说话";
+    else holdBtn.textContent = canceling ? "松开 取消" : "松开 结束";
+  }
 }
 
 function httpsEntryUrl() {
@@ -321,10 +332,6 @@ function refreshSecureHint() {
 }
 
 async function acquireMicStream() {
-  const reason = micBlockedReason();
-  if (reason && !getMediaDevices()) {
-    throw new Error(reason);
-  }
   if (!isSecureForMic()) {
     throw new Error(
       "当前为 HTTP 访问，浏览器禁止录音。请使用 HTTPS 打开本站（微信内尤其需要）。"
@@ -354,67 +361,6 @@ async function acquireMicStream() {
   }
 }
 
-async function startRecording() {
-  if (state.sending || state.asrBusy || state.recording) return false;
-  state.cancelRecord = false;
-  try {
-    mediaStream = await acquireMicStream();
-  } catch (err) {
-    alert(err.message || "无法开始录音");
-    return false;
-  }
-
-  recordChunks = [];
-  wavBuffers = [];
-  const mime = pickRecorderMime();
-
-  if (window.MediaRecorder && (mime || true)) {
-    try {
-      mediaRecorder = mime
-        ? new MediaRecorder(mediaStream, { mimeType: mime })
-        : new MediaRecorder(mediaStream);
-      recordMode = "mediarecorder";
-      mediaRecorder.ondataavailable = (e) => {
-        if (e.data && e.data.size > 0) recordChunks.push(e.data);
-      };
-      mediaRecorder.start(250);
-      setRecordingUi(true);
-      return true;
-    } catch {
-      mediaRecorder = null;
-    }
-  }
-
-  // iOS / 部分微信：无 MediaRecorder 时用 AudioContext 录 WAV
-  try {
-    const AC = window.AudioContext || window.webkitAudioContext;
-    if (!AC) throw new Error("no audio context");
-    audioCtx = new AC();
-    if (audioCtx.state === "suspended") await audioCtx.resume();
-    audioSource = audioCtx.createMediaStreamSource(mediaStream);
-    const bufferSize = 4096;
-    audioProcessor = audioCtx.createScriptProcessor(bufferSize, 1, 1);
-    wavSampleRate = audioCtx.sampleRate;
-    audioProcessor.onaudioprocess = (e) => {
-      const input = e.inputBuffer.getChannelData(0);
-      wavBuffers.push(new Float32Array(input));
-    };
-    const mute = audioCtx.createGain();
-    mute.gain.value = 0;
-    audioSource.connect(audioProcessor);
-    audioProcessor.connect(mute);
-    mute.connect(audioCtx.destination);
-    recordMode = "wav";
-    setRecordingUi(true);
-    return true;
-  } catch {
-    mediaStream?.getTracks().forEach((t) => t.stop());
-    mediaStream = null;
-    alert("当前浏览器无法录音，请升级微信或改用系统 Safari / Chrome");
-    return false;
-  }
-}
-
 function cleanupMic() {
   try {
     audioProcessor?.disconnect();
@@ -432,62 +378,134 @@ function cleanupMic() {
   audioProcessor = null;
   audioSource = null;
   audioCtx = null;
+  try {
+    if (mediaRecorder && mediaRecorder.state !== "inactive") mediaRecorder.stop();
+  } catch {
+    /* ignore */
+  }
   mediaStream?.getTracks().forEach((t) => t.stop());
   mediaStream = null;
   mediaRecorder = null;
   recordMode = "none";
+  recordChunks = [];
+  wavBuffers = [];
 }
 
-async function stopRecording({ cancel = false } = {}) {
-  if (!state.recording && !mediaRecorder && recordMode === "none") {
-    setRecordingUi(false);
-    return;
+async function beginCapture(session) {
+  mediaStream = await acquireMicStream();
+  if (session !== recSession || !holding) {
+    mediaStream.getTracks().forEach((t) => t.stop());
+    mediaStream = null;
+    return false;
   }
-  const shouldCancel = cancel || state.cancelRecord;
-  state.cancelRecord = shouldCancel;
 
-  if (recordMode === "mediarecorder" && mediaRecorder && mediaRecorder.state !== "inactive") {
+  recordChunks = [];
+  wavBuffers = [];
+  const mime = pickRecorderMime();
+
+  if (window.MediaRecorder) {
+    try {
+      mediaRecorder = mime
+        ? new MediaRecorder(mediaStream, { mimeType: mime })
+        : new MediaRecorder(mediaStream);
+      recordMode = "mediarecorder";
+      mediaRecorder.ondataavailable = (e) => {
+        if (e.data && e.data.size > 0) recordChunks.push(e.data);
+      };
+      mediaRecorder.start(200);
+      if (session !== recSession || !holding) {
+        cleanupMic();
+        return false;
+      }
+      setRecordingUi(true);
+      return true;
+    } catch {
+      mediaRecorder = null;
+    }
+  }
+
+  // iOS / 部分微信：无 MediaRecorder 时用 AudioContext 录 WAV
+  const AC = window.AudioContext || window.webkitAudioContext;
+  if (!AC) {
+    cleanupMic();
+    throw new Error("当前浏览器无法录音，请升级微信或改用系统 Safari / Chrome");
+  }
+  audioCtx = new AC();
+  if (audioCtx.state === "suspended") await audioCtx.resume();
+  if (session !== recSession || !holding) {
+    cleanupMic();
+    return false;
+  }
+  audioSource = audioCtx.createMediaStreamSource(mediaStream);
+  const bufferSize = 4096;
+  audioProcessor = audioCtx.createScriptProcessor(bufferSize, 1, 1);
+  wavSampleRate = audioCtx.sampleRate;
+  audioProcessor.onaudioprocess = (e) => {
+    const input = e.inputBuffer.getChannelData(0);
+    wavBuffers.push(new Float32Array(input));
+  };
+  const mute = audioCtx.createGain();
+  mute.gain.value = 0;
+  audioSource.connect(audioProcessor);
+  audioProcessor.connect(mute);
+  mute.connect(audioCtx.destination);
+  recordMode = "wav";
+  setRecordingUi(true);
+  return true;
+}
+
+async function finishCapture({ cancel = false } = {}) {
+  const shouldCancel = cancel || state.cancelRecord;
+  const mode = recordMode;
+  const chunks = recordChunks;
+  const wav = wavBuffers;
+  const sr = wavSampleRate;
+  const mimeType =
+    (mediaRecorder && mediaRecorder.mimeType) || pickRecorderMime() || "audio/webm";
+
+  if (mode === "mediarecorder" && mediaRecorder && mediaRecorder.state !== "inactive") {
     await new Promise((resolve) => {
-      mediaRecorder.onstop = resolve;
+      const done = () => resolve();
+      mediaRecorder.onstop = done;
       try {
         mediaRecorder.stop();
       } catch {
-        resolve();
+        done();
       }
+      setTimeout(done, 800);
     });
-    const mimeType = mediaRecorder.mimeType || pickRecorderMime() || "audio/webm";
-    cleanupMic();
-    setRecordingUi(false);
-    if (shouldCancel || !recordChunks.length) {
-      recordChunks = [];
-      return;
-    }
-    const blob = new Blob(recordChunks, { type: mimeType });
-    recordChunks = [];
-    await transcribeAudio(blob, mimeType);
+  }
+
+  cleanupMic();
+  setRecordingUi(false);
+
+  if (shouldCancel) return;
+
+  let blob = null;
+  let mime = mimeType;
+  if (mode === "mediarecorder") {
+    if (!chunks.length) return;
+    blob = new Blob(chunks, { type: mimeType });
+  } else if (mode === "wav") {
+    if (!wav.length) return;
+    blob = encodeWav(wav, sr);
+    mime = "audio/wav";
+  } else {
     return;
   }
 
-  if (recordMode === "wav") {
-    const chunks = wavBuffers;
-    const sr = wavSampleRate;
-    cleanupMic();
-    setRecordingUi(false);
-    wavBuffers = [];
-    if (shouldCancel || !chunks.length) return;
-    const blob = encodeWav(chunks, sr);
-    await transcribeAudio(blob, "audio/wav");
-  }
+  // 太短的录音直接忽略，避免误触
+  if (blob.size < 800) return;
+  await transcribeAudio(blob, mime);
 }
 
 async function transcribeAudio(blob, mimeType) {
   state.asrBusy = true;
-  holdBtn?.classList.add("busy");
-  if (voiceOverlay) {
-    voiceOverlay.classList.remove("hidden");
-    voiceOverlay.classList.remove("canceling");
-  }
+  updateSendState();
+  setRecordingUi(false, { recognizing: true });
+  voiceOverlay?.classList.remove("hidden");
   if (voiceHint) voiceHint.textContent = "正在识别…";
+  if (holdBtn) holdBtn.textContent = "识别中…";
   try {
     const dataUrl = await blobToBase64(blob);
     const data = await api("/api/asr", {
@@ -503,7 +521,6 @@ async function transcribeAudio(blob, mimeType) {
       return;
     }
     if (state.voiceMode) {
-      // 语音模式下识别后直接发送，贴近微信体感
       inputEl.value = text;
       updateSendState();
       await sendMessage();
@@ -519,13 +536,15 @@ async function transcribeAudio(blob, mimeType) {
     alert(err.message || "语音识别失败");
   } finally {
     state.asrBusy = false;
-    holdBtn?.classList.remove("busy");
+    setRecordingUi(false);
     voiceOverlay?.classList.add("hidden");
+    if (holdBtn) holdBtn.textContent = "按住 说话";
+    updateSendState();
   }
 }
 
-function onHoldStart(e) {
-  if (state.sending || state.asrBusy) return;
+async function onHoldStart(e) {
+  if (state.sending || state.asrBusy || holding) return;
   e.preventDefault();
   if (e.pointerId != null && holdBtn?.setPointerCapture) {
     try {
@@ -534,13 +553,34 @@ function onHoldStart(e) {
       /* ignore */
     }
   }
+  holding = true;
   holdPointerId = e.pointerId ?? null;
   holdStartY = e.clientY ?? e.touches?.[0]?.clientY ?? 0;
-  startRecording();
+  state.cancelRecord = false;
+  const session = ++recSession;
+  holdBtn?.classList.add("recording");
+  if (holdBtn) holdBtn.textContent = "准备中…";
+  try {
+    const ok = await beginCapture(session);
+    if (!ok) {
+      if (session === recSession) {
+        setRecordingUi(false);
+        holding = false;
+      }
+      return;
+    }
+  } catch (err) {
+    if (session === recSession) {
+      cleanupMic();
+      setRecordingUi(false);
+      holding = false;
+      alert(err.message || "无法开始录音");
+    }
+  }
 }
 
 function onHoldMove(e) {
-  if (!state.recording) return;
+  if (!holding || !state.recording) return;
   const y = e.clientY ?? e.touches?.[0]?.clientY ?? holdStartY;
   const canceling = holdStartY - y > 60;
   state.cancelRecord = canceling;
@@ -548,15 +588,23 @@ function onHoldMove(e) {
 }
 
 async function onHoldEnd(e) {
-  if (!state.recording && recordMode === "none") return;
   e?.preventDefault?.();
+  if (!holding) return;
   const cancel = state.cancelRecord;
+  holding = false;
   holdPointerId = null;
-  await stopRecording({ cancel });
+  // 使任何仍在启动中的会话失效
+  recSession += 1;
+  if (!state.recording && recordMode === "none") {
+    cleanupMic();
+    setRecordingUi(false);
+    return;
+  }
+  await finishCapture({ cancel });
 }
 
 modeBtn?.addEventListener("click", () => {
-  if (state.sending || state.asrBusy || state.recording) return;
+  if (state.sending || state.asrBusy || holding || state.recording) return;
   const next = !state.voiceMode;
   if (next) {
     const reason = micBlockedReason();
@@ -574,6 +622,7 @@ if (holdBtn) {
   holdBtn.addEventListener("pointermove", onHoldMove);
   holdBtn.addEventListener("pointerup", onHoldEnd);
   holdBtn.addEventListener("pointercancel", onHoldEnd);
+  holdBtn.addEventListener("lostpointercapture", onHoldEnd);
   holdBtn.addEventListener("contextmenu", (e) => e.preventDefault());
 }
 
@@ -870,17 +919,18 @@ function updateSendState() {
   const canSend =
     !state.sending &&
     !state.asrBusy &&
+    !holding &&
     !state.recording &&
     !!state.currentId &&
     (hasText || hasFile) &&
     !state.voiceMode;
 
   sendBtn.disabled = !canSend;
-  sendBtn.classList.toggle("hidden", state.sending);
+  sendBtn.classList.toggle("hidden", state.sending || state.voiceMode);
   stopBtn?.classList.toggle("hidden", !state.sending);
 
-  if (attachBtn) attachBtn.disabled = state.sending || state.recording || state.asrBusy;
-  if (modeBtn) modeBtn.disabled = state.sending || state.recording || state.asrBusy;
+  if (attachBtn) attachBtn.disabled = state.sending || holding || state.recording || state.asrBusy;
+  if (modeBtn) modeBtn.disabled = state.sending || holding || state.recording || state.asrBusy;
   if (holdBtn) holdBtn.disabled = state.sending || state.asrBusy;
   if (inputEl) inputEl.readOnly = state.sending;
 }

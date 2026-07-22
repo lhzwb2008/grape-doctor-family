@@ -570,50 +570,49 @@ body {
   color: white;
 }
 .btn-hold.busy {
-  opacity: 0.65;
+  opacity: 0.75;
   cursor: wait;
+  background: #e8eef2;
+  border-color: var(--line);
+  color: var(--ink-soft);
 }
 .btn-hold:disabled {
   opacity: 0.45;
   cursor: not-allowed;
 }
-.voice-overlay {
-  position: fixed;
-  inset: 0;
-  z-index: 40;
-  display: grid;
-  place-items: center;
-  background: rgba(11, 31, 42, 0.42);
-  pointer-events: none;
+.composer.voice-mode .btn-send { display: none !important; }
+.composer-wrap {
+  position: relative;
 }
-.voice-overlay.hidden { display: none; }
-.voice-overlay-inner {
-  width: min(72vw, 220px);
-  padding: 28px 18px 22px;
-  border-radius: 20px;
-  background: rgba(20, 24, 28, 0.88);
+.voice-overlay {
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 10px);
+  transform: translateX(-50%);
+  z-index: 20;
+  min-width: 168px;
+  max-width: 86%;
+  padding: 12px 16px;
+  border-radius: 12px;
+  background: rgba(20, 24, 28, 0.92);
   color: white;
   text-align: center;
+  pointer-events: none;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.22);
 }
-.voice-overlay.canceling .voice-overlay-inner {
-  background: rgba(180, 40, 40, 0.9);
+.voice-overlay.hidden { display: none; }
+.voice-overlay.canceling {
+  background: rgba(180, 40, 40, 0.94);
 }
-.voice-wave {
-  width: 56px;
-  height: 56px;
-  margin: 0 auto 14px;
-  border-radius: 50%;
-  background: radial-gradient(circle at 40% 35%, #7dffb0, #07c160 70%);
-  animation: micPulse 1s ease-in-out infinite;
-}
-.voice-overlay.canceling .voice-wave {
-  background: radial-gradient(circle at 40% 35%, #ffb0b0, #fa5151 70%);
+.voice-overlay.recognizing {
+  background: rgba(20, 24, 28, 0.92);
 }
 .voice-hint {
   margin: 0;
-  font-size: 0.9rem;
+  font-size: 0.86rem;
   font-weight: 650;
-  color: rgba(255,255,255,0.92);
+  color: rgba(255,255,255,0.95);
+  white-space: nowrap;
 }
 .secure-hint {
   margin: 8px 0 0;
@@ -628,11 +627,6 @@ body {
   word-break: break-all;
 }
 .btn-send { min-width: 72px; height: 44px; border-radius: 14px; padding: 0 14px; flex-shrink: 0; }
-
-@keyframes micPulse {
-  0%, 100% { transform: scale(1); opacity: 1; }
-  50% { transform: scale(1.08); opacity: 0.85; }
-}
 
 .bubble.assistant {
   position: relative;
