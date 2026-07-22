@@ -10,7 +10,7 @@ const state = {
 };
 
 const MAX_ATTACH = 5;
-const MAX_FILE_SIZE = 8 * 1024 * 1024;
+const MAX_FILE_SIZE = 12 * 1024 * 1024;
 
 const $ = (sel) => document.querySelector(sel);
 const loginView = $("#login-view");
@@ -393,7 +393,7 @@ fileInput.addEventListener("change", async () => {
       break;
     }
     if (file.size > MAX_FILE_SIZE) {
-      alert(`${file.name} 超过 8MB，已跳过`);
+      alert(`${file.name} 超过 12MB，已跳过`);
       continue;
     }
     try {
@@ -440,7 +440,7 @@ inputEl.addEventListener("paste", async (e) => {
     const file = item.getAsFile();
     if (!file) continue;
     if (file.size > MAX_FILE_SIZE) {
-      alert("粘贴图片超过 8MB");
+      alert("粘贴图片超过 12MB");
       continue;
     }
     const dataUrl = await readFileAsBase64(file);

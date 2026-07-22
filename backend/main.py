@@ -19,13 +19,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from backend import storage
-from backend.attachments import (
-    extract_docx_text,
-    extract_pdf_text,
-    is_docx,
-    is_legacy_doc,
-    is_pdf,
-)
+from backend.attachments import extract_attachment_text
 from backend.cursor_client import (
     build_chat_prompt,
     create_agent,
@@ -54,8 +48,8 @@ TEXT_MIMES = {
     "text/html",
 }
 MAX_ATTACHMENTS = 5
-MAX_FILE_BYTES = 8 * 1024 * 1024
-MAX_TEXT_CHARS = 60000
+MAX_FILE_BYTES = 12 * 1024 * 1024
+MAX_TEXT_CHARS = 80000
 
 
 def _secret() -> bytes:
@@ -139,7 +133,7 @@ def _prepare_attachments(
         except Exception as e:  # noqa: BLE001
             raise HTTPException(400, f"附件 {name} 解码失败") from e
         if len(raw) > MAX_FILE_BYTES:
-            raise HTTPException(400, f"附件 {name} 超过 8MB 限制")
+            raise HTTPException(400, f"附件 {name} 超过 12MB 限制")
 
         names.append(name)
 
@@ -150,43 +144,11 @@ def _prepare_attachments(
             notes.append(f"- 图片附件：{name}（已随请求提交，请结合图片内容回答）")
             continue
 
-        # 文本类：内嵌到 prompt，不落盘
-        if mime in TEXT_MIMES or mime.startswith("text/") or name.lower().endswith(
-            (".txt", ".md", ".csv", ".json", ".log", ".py", ".js", ".ts", ".html", ".css")
-        ):
-            try:
-                text = raw.decode("utf-8")
-            except UnicodeDecodeError:
-                text = raw.decode("utf-8", errors="replace")
-            if len(text) > MAX_TEXT_CHARS:
-                text = text[:MAX_TEXT_CHARS] + "\n…(内容过长已截断)"
-            notes.append(f"- 文件附件：{name}\n```\n{text}\n```")
-            continue
-
-        # PDF / Word：内存抽取正文后注入 prompt
-        if is_pdf(name, mime):
-            try:
-                text = extract_pdf_text(raw)
-            except Exception as e:  # noqa: BLE001
-                raise HTTPException(400, f"PDF 解析失败（{name}）：{e}") from e
-            notes.append(f"- PDF 附件：{name}\n```\n{text}\n```")
-            continue
-
-        if is_docx(name, mime):
-            try:
-                text = extract_docx_text(raw)
-            except Exception as e:  # noqa: BLE001
-                raise HTTPException(400, f"Word 解析失败（{name}）：{e}") from e
-            notes.append(f"- Word 附件：{name}\n```\n{text}\n```")
-            continue
-
-        if is_legacy_doc(name, mime):
-            raise HTTPException(400, f"暂不支持旧版 .doc（{name}），请另存为 .docx 或 PDF 后再上传")
-
-        notes.append(
-            f"- 附件：{name}（类型 {mime or 'unknown'}，暂不支持直接解析；"
-            "请改传 PDF/Word/图片/文本，或粘贴关键内容）"
-        )
+        try:
+            kind, text = extract_attachment_text(name, mime, raw)
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(400, f"附件解析失败（{name}）：{e}") from e
+        notes.append(f"- {kind} 附件：{name}\n```\n{text}\n```")
 
     prompt_notes = ""
     if notes:
