@@ -6,7 +6,11 @@ const state = {
   sessions: [],
   currentId: null,
   sending: false,
+  attachments: [], // { id, name, mime, data, previewUrl?, kind }
 };
+
+const MAX_ATTACH = 5;
+const MAX_FILE_SIZE = 8 * 1024 * 1024;
 
 const $ = (sel) => document.querySelector(sel);
 const loginView = $("#login-view");
@@ -25,6 +29,33 @@ const inputEl = $("#input");
 const sendBtn = $("#send-btn");
 const chatTitle = $("#chat-title");
 const deleteBtn = $("#delete-session-btn");
+const fileInput = $("#file-input");
+const attachPreview = $("#attach-preview");
+
+if (window.marked) {
+  marked.setOptions({ breaks: true, gfm: true });
+}
+
+function renderMarkdown(text) {
+  const raw = String(text || "");
+  if (!window.marked || !window.DOMPurify) {
+    return escapeHtml(raw).replaceAll("\n", "<br>");
+  }
+  const html = marked.parse(raw);
+  return DOMPurify.sanitize(html, {
+    USE_PROFILES: { html: true },
+  });
+}
+
+function setBubbleContent(el, text, { markdown = false, streaming = false } = {}) {
+  if (markdown && el.classList.contains("assistant")) {
+    el.innerHTML = `<div class="md">${renderMarkdown(text)}</div>`;
+  } else {
+    el.textContent = text;
+  }
+  if (streaming) el.classList.add("streaming");
+  else el.classList.remove("streaming");
+}
 
 async function api(path, options = {}) {
   const headers = { ...(options.headers || {}) };
@@ -151,6 +182,7 @@ $("#logout-btn").addEventListener("click", () => {
   state.token = "";
   state.member = null;
   state.currentId = null;
+  clearAttachments();
   localStorage.removeItem("grape_token");
   localStorage.removeItem("grape_member");
   showLogin();
@@ -197,6 +229,7 @@ async function createSession() {
     method: "POST",
     body: JSON.stringify({ title: "新对话" }),
   });
+  clearAttachments();
   await refreshSessions();
   await openSession(data.session.id);
 }
@@ -206,6 +239,7 @@ async function openSession(id) {
   state.currentId = id;
   chatTitle.textContent = data.session.title || "新对话";
   deleteBtn.classList.remove("hidden");
+  clearAttachments();
   renderSessions();
   renderMessages(data.session.messages || []);
 }
@@ -243,7 +277,7 @@ function renderMessages(messages) {
     return;
   }
   for (const m of messages) {
-    appendBubble(m.role, m.content);
+    appendBubble(m.role, m.content, { markdown: m.role === "assistant" });
   }
   scrollBottom();
 }
@@ -259,26 +293,35 @@ function bindSuggests(root) {
   });
 }
 
-function appendBubble(role, content, streaming = false) {
+function appendBubble(role, content, { markdown = false, streaming = false, previews = [] } = {}) {
   const el = document.createElement("div");
   el.className = `bubble ${role}` + (streaming ? " streaming" : "");
-  el.textContent = content;
+  if (role === "assistant" && (markdown || streaming)) {
+    setBubbleContent(el, content, { markdown: true, streaming });
+  } else {
+    el.textContent = content;
+  }
+  if (role === "user" && previews.length) {
+    const box = document.createElement("div");
+    box.className = "user-attach";
+    for (const p of previews) {
+      if (p.previewUrl) {
+        const img = document.createElement("img");
+        img.src = p.previewUrl;
+        img.alt = p.name;
+        box.appendChild(img);
+      } else {
+        const chip = document.createElement("span");
+        chip.className = "file-chip";
+        chip.textContent = `📄 ${p.name}`;
+        box.appendChild(chip);
+      }
+    }
+    el.appendChild(box);
+  }
   messagesEl.appendChild(el);
   scrollBottom();
   return el;
-}
-
-function showTyping() {
-  const el = document.createElement("div");
-  el.className = "typing";
-  el.id = "typing";
-  el.innerHTML = "<i></i><i></i><i></i>";
-  messagesEl.appendChild(el);
-  scrollBottom();
-}
-
-function hideTyping() {
-  $("#typing")?.remove();
 }
 
 function scrollBottom() {
@@ -286,8 +329,92 @@ function scrollBottom() {
 }
 
 function updateSendState() {
-  sendBtn.disabled = state.sending || !inputEl.value.trim() || !state.currentId;
+  const hasText = !!inputEl.value.trim();
+  const hasFile = state.attachments.length > 0;
+  sendBtn.disabled = state.sending || (!hasText && !hasFile) || !state.currentId;
 }
+
+function clearAttachments() {
+  for (const a of state.attachments) {
+    if (a.previewUrl) URL.revokeObjectURL(a.previewUrl);
+  }
+  state.attachments = [];
+  renderAttachPreview();
+  updateSendState();
+}
+
+function renderAttachPreview() {
+  attachPreview.innerHTML = "";
+  if (!state.attachments.length) {
+    attachPreview.classList.add("hidden");
+    return;
+  }
+  attachPreview.classList.remove("hidden");
+  for (const a of state.attachments) {
+    const chip = document.createElement("div");
+    chip.className = "attach-chip";
+    if (a.previewUrl) {
+      chip.innerHTML = `<img src="${a.previewUrl}" alt="" /><div class="meta">${escapeHtml(a.name)}</div>`;
+    } else {
+      chip.innerHTML = `<div class="meta">📄 ${escapeHtml(a.name)}</div>`;
+    }
+    const rm = document.createElement("button");
+    rm.type = "button";
+    rm.className = "rm";
+    rm.textContent = "×";
+    rm.addEventListener("click", () => {
+      state.attachments = state.attachments.filter((x) => x.id !== a.id);
+      if (a.previewUrl) URL.revokeObjectURL(a.previewUrl);
+      renderAttachPreview();
+      updateSendState();
+    });
+    chip.appendChild(rm);
+    attachPreview.appendChild(chip);
+  }
+}
+
+function readFileAsBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ""));
+    reader.onerror = () => reject(new Error(`读取失败：${file.name}`));
+    reader.readAsDataURL(file);
+  });
+}
+
+$("#attach-btn").addEventListener("click", () => fileInput.click());
+
+fileInput.addEventListener("change", async () => {
+  const files = [...(fileInput.files || [])];
+  fileInput.value = "";
+  for (const file of files) {
+    if (state.attachments.length >= MAX_ATTACH) {
+      alert(`一次最多 ${MAX_ATTACH} 个附件`);
+      break;
+    }
+    if (file.size > MAX_FILE_SIZE) {
+      alert(`${file.name} 超过 8MB，已跳过`);
+      continue;
+    }
+    try {
+      const dataUrl = await readFileAsBase64(file);
+      const mime = file.type || "application/octet-stream";
+      const isImage = mime.startsWith("image/");
+      state.attachments.push({
+        id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+        name: file.name,
+        mime,
+        data: dataUrl,
+        previewUrl: isImage ? URL.createObjectURL(file) : null,
+        kind: isImage ? "image" : "file",
+      });
+    } catch (err) {
+      alert(err.message);
+    }
+  }
+  renderAttachPreview();
+  updateSendState();
+});
 
 inputEl.addEventListener("input", () => {
   inputEl.style.height = "auto";
@@ -302,6 +429,34 @@ inputEl.addEventListener("keydown", (e) => {
   }
 });
 
+// 粘贴图片
+inputEl.addEventListener("paste", async (e) => {
+  const items = [...(e.clipboardData?.items || [])];
+  const images = items.filter((i) => i.type.startsWith("image/"));
+  if (!images.length) return;
+  e.preventDefault();
+  for (const item of images) {
+    if (state.attachments.length >= MAX_ATTACH) break;
+    const file = item.getAsFile();
+    if (!file) continue;
+    if (file.size > MAX_FILE_SIZE) {
+      alert("粘贴图片超过 8MB");
+      continue;
+    }
+    const dataUrl = await readFileAsBase64(file);
+    state.attachments.push({
+      id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+      name: file.name || `paste-${Date.now()}.png`,
+      mime: file.type || "image/png",
+      data: dataUrl,
+      previewUrl: URL.createObjectURL(file),
+      kind: "image",
+    });
+  }
+  renderAttachPreview();
+  updateSendState();
+});
+
 $("#composer").addEventListener("submit", (e) => {
   e.preventDefault();
   sendMessage();
@@ -309,17 +464,28 @@ $("#composer").addEventListener("submit", (e) => {
 
 async function sendMessage() {
   const text = inputEl.value.trim();
-  if (!text || state.sending || !state.currentId) return;
+  const pending = [...state.attachments];
+  if ((!text && !pending.length) || state.sending || !state.currentId) return;
 
-  // remove welcome
   messagesEl.querySelector(".welcome")?.remove();
 
   state.sending = true;
   updateSendState();
   inputEl.value = "";
   inputEl.style.height = "auto";
-  appendBubble("user", text);
-  showTyping();
+
+  const previews = pending.map((a) => ({
+    name: a.name,
+    previewUrl: a.previewUrl,
+  }));
+  appendBubble("user", text || "（附件）", { previews });
+
+  // 清空待发送附件（内存释放在请求后）
+  state.attachments = [];
+  renderAttachPreview();
+
+  const bubble = appendBubble("assistant", "正在连接…", { markdown: true, streaming: true });
+  bubble.dataset.status = "1";
 
   try {
     const res = await fetch(`/api/sessions/${state.currentId}/chat`, {
@@ -328,19 +494,28 @@ async function sendMessage() {
         "Content-Type": "application/json",
         Authorization: `Bearer ${state.token}`,
       },
-      body: JSON.stringify({ message: text }),
+      body: JSON.stringify({
+        message: text,
+        attachments: pending.map((a) => ({
+          name: a.name,
+          mime: a.mime,
+          data: a.data,
+        })),
+      }),
     });
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
-      throw new Error(err.detail || `发送失败 ${res.status}`);
+      let msg = err.detail || `发送失败 ${res.status}`;
+      if (Array.isArray(msg)) msg = msg.map((x) => x.msg || JSON.stringify(x)).join("；");
+      throw new Error(msg);
     }
 
-    hideTyping();
-    const bubble = appendBubble("assistant", "", true);
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
     let finalText = "";
+    let gotDelta = false;
+    let lastRender = 0;
 
     while (true) {
       const { done, value } = await reader.read();
@@ -357,34 +532,52 @@ async function sendMessage() {
         } catch {
           continue;
         }
-        if (payload.type === "delta" && payload.text) {
-          // SSE 可能推送增量或累计文本；这里做简单拼接，并去重累计
-          if (payload.text.startsWith(finalText)) {
+        if (payload.type === "status" && payload.message && !gotDelta) {
+          setBubbleContent(bubble, payload.message, { markdown: false, streaming: true });
+          scrollBottom();
+        } else if (payload.type === "delta" && payload.text) {
+          if (!gotDelta) {
+            gotDelta = true;
+            finalText = "";
+          }
+          if (payload.text.startsWith(finalText) && payload.text.length >= finalText.length) {
             finalText = payload.text;
           } else {
             finalText += payload.text;
           }
-          bubble.textContent = finalText;
-          scrollBottom();
+          const now = Date.now();
+          if (now - lastRender > 40) {
+            setBubbleContent(bubble, finalText, { markdown: true, streaming: true });
+            lastRender = now;
+            scrollBottom();
+          }
         } else if (payload.type === "done") {
           finalText = payload.text || finalText;
-          bubble.textContent = finalText;
-          bubble.classList.remove("streaming");
+          setBubbleContent(bubble, finalText, { markdown: true, streaming: false });
+          scrollBottom();
         } else if (payload.type === "error") {
-          bubble.textContent = `抱歉，暂时无法完成回复：${payload.message}`;
-          bubble.classList.remove("streaming");
+          setBubbleContent(bubble, `抱歉，暂时无法完成回复：${payload.message}`, {
+            markdown: false,
+            streaming: false,
+          });
         }
       }
     }
-    bubble.classList.remove("streaming");
-    if (!bubble.textContent) bubble.textContent = "（无回复）";
+    if (finalText) {
+      setBubbleContent(bubble, finalText, { markdown: true, streaming: false });
+    } else if (!bubble.textContent || bubble.dataset.status === "1") {
+      setBubbleContent(bubble, "（无回复）", { markdown: false, streaming: false });
+    }
+    delete bubble.dataset.status;
     await refreshSessions();
     const cur = state.sessions.find((s) => s.id === state.currentId);
     if (cur) chatTitle.textContent = cur.title || "新对话";
   } catch (err) {
-    hideTyping();
-    appendBubble("assistant", `抱歉，出错了：${err.message}`);
+    setBubbleContent(bubble, `抱歉，出错了：${err.message}`, { markdown: false, streaming: false });
   } finally {
+    for (const a of pending) {
+      if (a.previewUrl) URL.revokeObjectURL(a.previewUrl);
+    }
     state.sending = false;
     updateSendState();
     inputEl.focus();

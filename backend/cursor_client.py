@@ -74,12 +74,15 @@ def _http(method: str, path: str, body: dict | None = None) -> tuple[int, Any, s
     raise RuntimeError(f"HTTP {method} {path} 失败: {last_err}") from last_err
 
 
-def create_agent(prompt: str) -> tuple[str, str]:
+def create_agent(prompt: str, images: list[dict] | None = None) -> tuple[str, str]:
+    prompt_obj: dict[str, Any] = {"text": prompt}
+    if images:
+        prompt_obj["images"] = images
     status, data, raw = _http(
         "POST",
         "/v1/agents",
         {
-            "prompt": {"text": prompt},
+            "prompt": prompt_obj,
             "model": {"id": model_id()},
             "repos": [{"url": sandbox_repo_url()}],
             "autoCreatePR": False,
@@ -92,12 +95,15 @@ def create_agent(prompt: str) -> tuple[str, str]:
     return agent_id, run_id
 
 
-def create_run(agent_id: str, prompt: str) -> str:
+def create_run(agent_id: str, prompt: str, images: list[dict] | None = None) -> str:
+    prompt_obj: dict[str, Any] = {"text": prompt}
+    if images:
+        prompt_obj["images"] = images
     for _ in range(30):
         status, data, raw = _http(
             "POST",
             f"/v1/agents/{agent_id}/runs",
-            {"prompt": {"text": prompt}},
+            {"prompt": prompt_obj},
         )
         if status in (200, 201) and isinstance(data, dict):
             return data["run"]["id"]
@@ -121,6 +127,7 @@ def _consume_sse(
     on_assistant: Callable[[str], None] | None = None,
     timeout_s: float = 600,
 ) -> None:
+    """逐行读取 SSE，避免 read(4096) 缓冲导致前端看不到流式。"""
     url = f"{base_url()}/v1/agents/{agent_id}/runs/{run_id}/stream"
     req = urllib.request.Request(
         url,
@@ -129,33 +136,33 @@ def _consume_sse(
     deadline = time.time() + timeout_s
     try:
         with urllib.request.urlopen(req, timeout=timeout_s) as resp:
-            buf = ""
+            event_name = "message"
+            data_lines: list[str] = []
             while time.time() < deadline:
-                chunk = resp.read(4096)
-                if not chunk:
+                raw_line = resp.readline()
+                if not raw_line:
                     break
-                buf += chunk.decode(errors="replace")
-                while "\n\n" in buf:
-                    block, buf = buf.split("\n\n", 1)
+                line = raw_line.decode(errors="replace").rstrip("\r\n")
+                if line == "":
+                    if data_lines:
+                        try:
+                            payload = json.loads("\n".join(data_lines))
+                        except json.JSONDecodeError:
+                            payload = None
+                        if isinstance(payload, dict):
+                            if event_name == "assistant" and on_assistant:
+                                text = payload.get("text")
+                                if isinstance(text, str) and text:
+                                    on_assistant(text)
+                            elif event_name in ("result", "done", "error"):
+                                return
                     event_name = "message"
-                    data_lines: list[str] = []
-                    for line in block.split("\n"):
-                        if line.startswith("event:"):
-                            event_name = line[6:].strip()
-                        elif line.startswith("data:"):
-                            data_lines.append(line[5:].strip())
-                    if not data_lines:
-                        continue
-                    try:
-                        payload = json.loads("\n".join(data_lines))
-                    except json.JSONDecodeError:
-                        continue
-                    if event_name == "assistant" and on_assistant:
-                        text = payload.get("text")
-                        if isinstance(text, str) and text:
-                            on_assistant(text)
-                    elif event_name in ("result", "done", "error"):
-                        return
+                    data_lines = []
+                    continue
+                if line.startswith("event:"):
+                    event_name = line[6:].strip()
+                elif line.startswith("data:"):
+                    data_lines.append(line[5:].strip())
     except Exception:
         return
 
@@ -165,12 +172,25 @@ def run_with_stream(
     run_id: str,
     *,
     timeout_ms: int = int(os.environ.get("CURSOR_AGENT_TIMEOUT_MS", "600000")),
-    poll_interval_ms: int = 3000,
+    poll_interval_ms: int = 1500,
     on_assistant: Callable[[str], None] | None = None,
 ) -> tuple[str, str]:
     assistant_buf: list[str] = []
+    seen = ""
 
-    def _on_assistant(delta: str) -> None:
+    def _on_assistant(piece: str) -> None:
+        nonlocal seen
+        if not piece:
+            return
+        # 兼容增量包 / 累计全文包
+        if seen and piece.startswith(seen):
+            delta = piece[len(seen) :]
+            seen = piece
+        else:
+            delta = piece
+            seen += piece
+        if not delta:
+            return
         assistant_buf.append(delta)
         if on_assistant:
             on_assistant(delta)
@@ -206,7 +226,7 @@ def run_with_stream(
         time.sleep(poll_interval_ms / 1000)
 
     sse_thread.join(timeout=2)
-    text = final_text or "".join(assistant_buf)
+    text = final_text or "".join(assistant_buf) or seen
     return text, final_status
 
 
@@ -221,10 +241,20 @@ SYSTEM_PREAMBLE = """你是「葡萄个人助手家庭版」——面向家庭�
 请用亲切、专业、温暖的语气回复。"""
 
 
-def build_chat_prompt(member_name: str, user_message: str, *, is_first: bool) -> str:
+def build_chat_prompt(
+    member_name: str,
+    user_message: str,
+    *,
+    is_first: bool,
+    attachment_notes: str = "",
+) -> str:
+    body = user_message.strip() or "（用户发送了附件，请根据附件内容回答）"
+    if attachment_notes:
+        body = f"{body}\n\n{attachment_notes}"
     if is_first:
         return (
             SYSTEM_PREAMBLE.format(member_name=member_name)
-            + f"\n\n【用户问题】\n{user_message}"
+            + "\n请优先使用清晰的 Markdown 排版（标题、列表、加粗等）。"
+            + f"\n\n【用户问题】\n{body}"
         )
-    return f"【用户后续问题】\n{user_message}"
+    return f"【用户后续问题】\n{body}"

@@ -7,7 +7,9 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;500;600;700;800&family=Noto+Sans+SC:wght@400;500;700&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/static/styles.css" />
+  <link rel="stylesheet" href="/static/styles.css?v=3" />
+  <script src="https://cdn.jsdelivr.net/npm/marked@15.0.7/marked.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/dompurify@3.2.4/dist/purify.min.js"></script>
 </head>
 <body>
   <div class="bg-grid" aria-hidden="true"></div>
@@ -15,7 +17,6 @@
   <div class="bg-orb orb-b" aria-hidden="true"></div>
   <div class="bg-orb orb-c" aria-hidden="true"></div>
 
-  <!-- Login -->
   <section id="login-view" class="view login-view">
     <header class="login-hero">
       <div class="brand-mark" aria-hidden="true">
@@ -44,7 +45,6 @@
     </div>
   </section>
 
-  <!-- Chat -->
   <section id="chat-view" class="view chat-view hidden">
     <aside class="sidebar">
       <div class="side-brand">
@@ -75,7 +75,7 @@
         <div class="welcome" id="welcome">
           <div class="welcome-glow"></div>
           <h3>你好，我是葡萄家庭健康助手</h3>
-          <p>可以问我感冒发烧、用药提醒、饮食作息，或其他生活问题。紧急情况请直接就医或拨打急救电话。</p>
+          <p>可以问我感冒发烧、用药提醒、饮食作息，或其他生活问题。也可上传检查单照片/文本（仅本轮使用，不保存）。紧急情况请直接就医。</p>
           <div class="suggests">
             <button type="button" data-q="孩子晚上咳嗽，有点发烧怎么办？">孩子咳嗽发烧</button>
             <button type="button" data-q="高血压平时饮食要注意什么？">高血压饮食</button>
@@ -84,15 +84,21 @@
         </div>
       </div>
 
-      <form class="composer" id="composer">
-        <textarea id="input" rows="1" placeholder="描述症状或问题，按 Enter 发送…" maxlength="8000"></textarea>
-        <button type="submit" class="btn-send" id="send-btn" disabled>
-          <span>发送</span>
-        </button>
-      </form>
+      <div class="composer-wrap">
+        <div id="attach-preview" class="attach-preview hidden"></div>
+        <form class="composer" id="composer">
+          <input type="file" id="file-input" class="hidden" multiple accept="image/png,image/jpeg,image/gif,image/webp,.txt,.md,.csv,.json,.log,.pdf,text/*" />
+          <button type="button" class="btn-attach" id="attach-btn" title="上传图片或文件（仅本轮，不保存）">📎</button>
+          <textarea id="input" rows="1" placeholder="描述症状或问题，可附带图片/文件…" maxlength="8000"></textarea>
+          <button type="submit" class="btn-send" id="send-btn" disabled>
+            <span>发送</span>
+          </button>
+        </form>
+        <p class="attach-tip">附件仅用于本次提问，不会保存到服务器</p>
+      </div>
     </main>
   </section>
 
-  <script src="/static/app.js"></script>
+  <script src="/static/app.js?v=3"></script>
 </body>
 </html>
