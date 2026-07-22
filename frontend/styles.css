@@ -464,6 +464,7 @@ body {
 }
 
 .composer-wrap {
+  position: relative;
   padding: 8px 12px calc(10px + env(safe-area-inset-bottom, 0px));
   min-width: 0;
   max-width: 100%;
@@ -581,9 +582,6 @@ body {
   cursor: not-allowed;
 }
 .composer.voice-mode .btn-send { display: none !important; }
-.composer-wrap {
-  position: relative;
-}
 .voice-overlay {
   position: absolute;
   left: 50%;
