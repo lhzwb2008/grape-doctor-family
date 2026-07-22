@@ -8,7 +8,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;500;600;700;800&family=Noto+Sans+SC:wght@400;500;700&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/static/styles.css?v=9" />
+  <link rel="stylesheet" href="/static/styles.css?v=10" />
   <script src="https://cdn.jsdelivr.net/npm/marked@15.0.7/marked.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/dompurify@3.2.4/dist/purify.min.js"></script>
 </head>
@@ -76,7 +76,7 @@
         <div class="welcome" id="welcome">
           <div class="welcome-glow"></div>
           <h3>你好，我是葡萄家庭健康助手</h3>
-          <p>健康咨询、生活问题都可以问我。也可点 📎 上传检查单，或点 🎤 语音输入。</p>
+          <p>健康咨询、生活问题都可以问我。点 🎤 可切换「按住说话」，也可点 📎 上传检查单。</p>
           <div class="suggests">
             <button type="button" class="tap" data-q="孩子晚上咳嗽，有点发烧怎么办？">孩子咳嗽发烧</button>
             <button type="button" class="tap" data-q="高血压平时饮食要注意什么？">高血压饮食</button>
@@ -87,20 +87,30 @@
 
       <div class="composer-wrap">
         <div id="attach-preview" class="attach-preview hidden"></div>
-        <p id="voice-hint" class="voice-hint hidden" aria-live="polite">正在听你说… 再点一下结束</p>
+        <div id="voice-overlay" class="voice-overlay hidden" aria-live="polite">
+          <div class="voice-overlay-inner">
+            <div class="voice-wave" aria-hidden="true"></div>
+            <p id="voice-hint" class="voice-hint">松开发送，上滑取消</p>
+          </div>
+        </div>
         <form class="composer" id="composer">
           <input type="file" id="file-input" class="hidden" multiple accept="image/png,image/jpeg,image/gif,image/webp,application/pdf,.pdf,application/msword,.doc,.docx,application/vnd.ms-excel,.xls,.xlsx,.ppt,.pptx,.rtf,.txt,.md,.csv,.json,.log,text/*" />
           <button type="button" class="btn-attach tap" id="attach-btn" title="上传附件（仅本轮）">📎</button>
-          <button type="button" class="btn-mic tap" id="mic-btn" title="语音输入" aria-label="语音输入">🎤</button>
-          <textarea id="input" rows="1" placeholder="" maxlength="8000"></textarea>
+          <button type="button" class="btn-mode tap" id="mode-btn" title="切换语音输入" aria-label="切换语音输入">🎤</button>
+          <textarea id="input" rows="1" placeholder="输入消息…" maxlength="8000"></textarea>
+          <button type="button" class="btn-hold" id="hold-btn" hidden>按住 说话</button>
           <button type="submit" class="btn-send tap" id="send-btn" disabled>
             <span>发送</span>
           </button>
+          <button type="button" class="btn-stop tap hidden" id="stop-btn" title="停止生成" aria-label="停止生成">
+            <span>停止</span>
+          </button>
         </form>
+        <p id="secure-hint" class="secure-hint hidden"></p>
       </div>
     </main>
   </section>
 
-  <script src="/static/app.js?v=9"></script>
+  <script src="/static/app.js?v=10"></script>
 </body>
 </html>

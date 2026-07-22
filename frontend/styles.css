@@ -214,8 +214,27 @@ body {
 .btn-primary:hover, .btn-new:hover, .btn-send:hover:not(:disabled) {
   transform: translateY(-1px); filter: brightness(1.05); background-position: 100% 50%;
 }
-.btn-primary:disabled, .btn-send:disabled { opacity: 0.45; cursor: not-allowed; transform: none; }
+.btn-primary:disabled, .btn-send:disabled {
+  opacity: 1;
+  cursor: not-allowed;
+  transform: none;
+  filter: none;
+  background: #c8d0d6;
+  box-shadow: none;
+  color: #f7f9fa;
+  animation: none !important;
+}
 .btn-send:not(:disabled) { animation: softPulse 2.4s ease-in-out infinite; }
+.btn-send.hidden, .btn-stop.hidden { display: none !important; }
+.btn-stop {
+  appearance: none; border: none; cursor: pointer; font-family: inherit; font-weight: 700;
+  min-width: 72px; height: 44px; border-radius: 14px; padding: 0 14px; flex-shrink: 0;
+  color: white;
+  background: linear-gradient(120deg, #ff6b8a, #ff8f6b);
+  box-shadow: 0 8px 20px rgba(255, 107, 138, 0.28);
+  transition: transform 0.15s, filter 0.15s, opacity 0.2s;
+}
+.btn-stop:hover { transform: translateY(-1px); filter: brightness(1.05); }
 .tap {
   transition: transform 0.15s ease, filter 0.15s ease, box-shadow 0.15s ease;
   -webkit-tap-highlight-color: transparent;
@@ -496,10 +515,9 @@ body {
   box-shadow: 0 8px 24px rgba(0, 100, 120, 0.05);
   transition: border-color 0.2s, box-shadow 0.2s, transform 0.15s;
 }
-.composer textarea:focus {
-  border-color: var(--cyan);
-  box-shadow: 0 0 0 4px rgba(0, 194, 255, 0.14);
-  transform: translateY(-1px);
+.composer textarea[readonly] {
+  opacity: 0.72;
+  background: #eef2f4;
 }
 .btn-attach {
   appearance: none; border: 1.5px solid var(--line); background: white;
@@ -510,32 +528,111 @@ body {
 }
 .btn-attach:hover { transform: translateY(-1px); border-color: var(--cyan); }
 .btn-attach:active { background: #f3fcff; }
-.btn-mic {
+.btn-attach:disabled, .btn-mode:disabled {
+  opacity: 0.45; cursor: not-allowed; transform: none;
+}
+.btn-mode {
   appearance: none; border: 1.5px solid var(--line); background: white;
   width: 44px; height: 44px; border-radius: 14px; cursor: pointer;
-  font-size: 1.1rem; flex-shrink: 0;
+  font-size: 1.05rem; flex-shrink: 0;
   box-shadow: 0 8px 24px rgba(0, 100, 120, 0.05);
-  transition: transform 0.15s, border-color 0.15s, background 0.15s, box-shadow 0.2s;
+  transition: transform 0.15s, border-color 0.15s, background 0.15s;
 }
-.btn-mic:hover { transform: translateY(-1px); border-color: var(--cyan); }
-.btn-mic.recording {
-  background: #ffe4ea;
-  border-color: var(--coral);
-  box-shadow: 0 0 0 4px rgba(255, 90, 120, 0.18);
-  animation: micPulse 1.2s ease-in-out infinite;
+.btn-mode:hover { transform: translateY(-1px); border-color: var(--cyan); }
+.btn-hold {
+  flex: 1;
+  min-width: 0;
+  min-height: 44px;
+  appearance: none;
+  border: 1.5px solid var(--line);
+  border-radius: 16px;
+  background: #f3f6f8;
+  color: var(--ink);
+  font: inherit;
+  font-size: 0.98rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: none;
+  box-shadow: 0 8px 24px rgba(0, 100, 120, 0.05);
+  transition: background 0.15s, border-color 0.15s, color 0.15s, transform 0.12s;
 }
-.btn-mic.busy { opacity: 0.55; cursor: wait; }
-@keyframes micPulse {
-  0%, 100% { transform: scale(1); }
-  50% { transform: scale(1.06); }
+.btn-hold:active, .btn-hold.recording {
+  background: #07c160;
+  border-color: #07c160;
+  color: white;
+}
+.btn-hold.canceling {
+  background: #fa5151;
+  border-color: #fa5151;
+  color: white;
+}
+.btn-hold.busy {
+  opacity: 0.65;
+  cursor: wait;
+}
+.btn-hold:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.voice-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: grid;
+  place-items: center;
+  background: rgba(11, 31, 42, 0.42);
+  pointer-events: none;
+}
+.voice-overlay.hidden { display: none; }
+.voice-overlay-inner {
+  width: min(72vw, 220px);
+  padding: 28px 18px 22px;
+  border-radius: 20px;
+  background: rgba(20, 24, 28, 0.88);
+  color: white;
+  text-align: center;
+}
+.voice-overlay.canceling .voice-overlay-inner {
+  background: rgba(180, 40, 40, 0.9);
+}
+.voice-wave {
+  width: 56px;
+  height: 56px;
+  margin: 0 auto 14px;
+  border-radius: 50%;
+  background: radial-gradient(circle at 40% 35%, #7dffb0, #07c160 70%);
+  animation: micPulse 1s ease-in-out infinite;
+}
+.voice-overlay.canceling .voice-wave {
+  background: radial-gradient(circle at 40% 35%, #ffb0b0, #fa5151 70%);
 }
 .voice-hint {
-  margin: 0 0 8px;
-  font-size: 0.78rem;
-  font-weight: 600;
-  color: var(--coral);
+  margin: 0;
+  font-size: 0.9rem;
+  font-weight: 650;
+  color: rgba(255,255,255,0.92);
+}
+.secure-hint {
+  margin: 8px 0 0;
+  font-size: 0.72rem;
+  color: var(--ink-soft);
+  font-weight: 560;
+  line-height: 1.4;
+}
+.secure-hint a {
+  color: var(--cyan);
+  font-weight: 700;
+  word-break: break-all;
 }
 .btn-send { min-width: 72px; height: 44px; border-radius: 14px; padding: 0 14px; flex-shrink: 0; }
+
+@keyframes micPulse {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(1.08); opacity: 0.85; }
+}
 
 .bubble.assistant {
   position: relative;
@@ -612,7 +709,9 @@ body {
 
 @media (min-width: 821px) {
   .btn-attach { width: 52px; height: 52px; border-radius: 16px; }
-  .btn-mic { width: 52px; height: 52px; border-radius: 16px; }
+  .btn-mode { width: 52px; height: 52px; border-radius: 16px; }
+  .btn-hold { min-height: 52px; border-radius: 18px; font-size: 1.02rem; }
+  .btn-stop { min-width: 88px; height: 52px; border-radius: 16px; }
   .composer textarea { min-height: 52px; max-height: 160px; font-size: 0.95rem; border-radius: 18px; }
   .btn-send { min-width: 88px; height: 52px; border-radius: 16px; }
   .composer-wrap { padding: 10px 24px calc(16px + env(safe-area-inset-bottom, 0px)); }

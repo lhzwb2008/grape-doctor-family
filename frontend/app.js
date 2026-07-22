@@ -9,6 +9,8 @@ const state = {
   attachments: [], // { id, name, mime, data, previewUrl?, kind }
   recording: false,
   asrBusy: false,
+  voiceMode: false,
+  cancelRecord: false,
 };
 
 const MAX_ATTACH = 5;
@@ -29,6 +31,7 @@ const messagesEl = $("#messages");
 const welcomeEl = $("#welcome");
 const inputEl = $("#input");
 const sendBtn = $("#send-btn");
+const stopBtn = $("#stop-btn");
 const chatTitle = $("#chat-title");
 const deleteBtn = $("#delete-session-btn");
 const fileInput = $("#file-input");
@@ -37,13 +40,26 @@ const sidebar = $("#sidebar");
 const sidebarMask = $("#sidebar-mask");
 const menuBtn = $("#menu-btn");
 const sidebarClose = $("#sidebar-close");
-const micBtn = $("#mic-btn");
+const modeBtn = $("#mode-btn");
+const holdBtn = $("#hold-btn");
 const voiceHint = $("#voice-hint");
+const voiceOverlay = $("#voice-overlay");
+const secureHint = $("#secure-hint");
+const attachBtn = $("#attach-btn");
 
 let mediaRecorder = null;
 let mediaStream = null;
 let recordChunks = [];
 let currentAudio = null;
+let chatAbort = null;
+let recordMode = "none"; // mediarecorder | wav
+let audioCtx = null;
+let audioProcessor = null;
+let audioSource = null;
+let wavBuffers = [];
+let wavSampleRate = 16000;
+let holdStartY = 0;
+let holdPointerId = null;
 function openSidebar() {
   sidebar?.classList.add("open");
   sidebarMask?.classList.add("show");
@@ -172,85 +188,306 @@ function blobToBase64(blob) {
   });
 }
 
+function isSecureForMic() {
+  if (window.isSecureContext) return true;
+  const host = location.hostname;
+  return host === "localhost" || host === "127.0.0.1";
+}
+
+function getMediaDevices() {
+  if (navigator.mediaDevices?.getUserMedia) return navigator.mediaDevices;
+  const legacy =
+    navigator.getUserMedia ||
+    navigator.webkitGetUserMedia ||
+    navigator.mozGetUserMedia ||
+    navigator.msGetUserMedia;
+  if (!legacy) return null;
+  return {
+    getUserMedia: (constraints) =>
+      new Promise((resolve, reject) => {
+        legacy.call(navigator, constraints, resolve, reject);
+      }),
+  };
+}
+
 function pickRecorderMime() {
+  if (!window.MediaRecorder) return "";
   const candidates = [
     "audio/webm;codecs=opus",
     "audio/webm",
     "audio/mp4",
+    "audio/aac",
     "audio/ogg;codecs=opus",
   ];
   for (const m of candidates) {
-    if (window.MediaRecorder && MediaRecorder.isTypeSupported(m)) return m;
+    try {
+      if (MediaRecorder.isTypeSupported(m)) return m;
+    } catch {
+      /* ignore */
+    }
   }
   return "";
 }
 
-function setRecordingUi(on) {
+function encodeWav(floatChunks, sampleRate) {
+  let len = 0;
+  for (const c of floatChunks) len += c.length;
+  const samples = new Float32Array(len);
+  let offset = 0;
+  for (const c of floatChunks) {
+    samples.set(c, offset);
+    offset += c.length;
+  }
+  const buffer = new ArrayBuffer(44 + samples.length * 2);
+  const view = new DataView(buffer);
+  const writeStr = (o, s) => {
+    for (let i = 0; i < s.length; i++) view.setUint8(o + i, s.charCodeAt(i));
+  };
+  writeStr(0, "RIFF");
+  view.setUint32(4, 36 + samples.length * 2, true);
+  writeStr(8, "WAVE");
+  writeStr(12, "fmt ");
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  writeStr(36, "data");
+  view.setUint32(40, samples.length * 2, true);
+  let p = 44;
+  for (let i = 0; i < samples.length; i++, p += 2) {
+    const s = Math.max(-1, Math.min(1, samples[i]));
+    view.setInt16(p, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+  }
+  return new Blob([buffer], { type: "audio/wav" });
+}
+
+function setVoiceMode(on) {
+  state.voiceMode = !!on;
+  if (inputEl) inputEl.hidden = state.voiceMode;
+  if (holdBtn) holdBtn.hidden = !state.voiceMode;
+  if (modeBtn) {
+    modeBtn.textContent = state.voiceMode ? "⌨️" : "🎤";
+    modeBtn.title = state.voiceMode ? "切换文字输入" : "切换语音输入";
+  }
+  updateSendState();
+}
+
+function setRecordingUi(on, { canceling = false } = {}) {
   state.recording = on;
-  micBtn?.classList.toggle("recording", on);
+  holdBtn?.classList.toggle("recording", on);
+  holdBtn?.classList.toggle("canceling", canceling);
+  voiceOverlay?.classList.toggle("hidden", !on);
+  voiceOverlay?.classList.toggle("canceling", canceling);
   if (voiceHint) {
-    voiceHint.classList.toggle("hidden", !on);
-    voiceHint.textContent = on ? "正在听你说… 再点一下结束" : "";
+    if (!on) voiceHint.textContent = "松开发送，上滑取消";
+    else if (canceling) voiceHint.textContent = "松开手指，取消发送";
+    else voiceHint.textContent = "松开发送，上滑取消";
+  }
+  if (holdBtn) holdBtn.textContent = on ? (canceling ? "松开 取消" : "松开 结束") : "按住 说话";
+}
+
+function httpsEntryUrl() {
+  const host = location.hostname;
+  if (host.endsWith("sslip.io") || host.endsWith("nip.io")) {
+    return `https://${host}`;
+  }
+  if (/^\d+\.\d+\.\d+\.\d+$/.test(host)) {
+    return `https://${host}.sslip.io`;
+  }
+  return `https://${host}`;
+}
+
+function micBlockedReason() {
+  if (!isSecureForMic()) {
+    return `语音功能需要 HTTPS。请用微信或浏览器打开：${httpsEntryUrl()}`;
+  }
+  if (!getMediaDevices()) {
+    return "当前环境无法使用麦克风，请换用系统浏览器或升级微信后重试";
+  }
+  return "";
+}
+
+function refreshSecureHint() {
+  if (!secureHint) return;
+  if (!isSecureForMic()) {
+    secureHint.innerHTML = `语音需 HTTPS，请访问 <a href="${httpsEntryUrl()}">${httpsEntryUrl()}</a>`;
+    secureHint.classList.remove("hidden");
+  } else {
+    secureHint.classList.add("hidden");
+  }
+}
+
+async function acquireMicStream() {
+  const reason = micBlockedReason();
+  if (reason && !getMediaDevices()) {
+    throw new Error(reason);
+  }
+  if (!isSecureForMic()) {
+    throw new Error(
+      "当前为 HTTP 访问，浏览器禁止录音。请使用 HTTPS 打开本站（微信内尤其需要）。"
+    );
+  }
+  const devices = getMediaDevices();
+  if (!devices) {
+    throw new Error("当前浏览器不支持麦克风，请升级微信或改用系统浏览器");
+  }
+  try {
+    return await devices.getUserMedia({
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        channelCount: 1,
+      },
+    });
+  } catch (err) {
+    const name = err?.name || "";
+    if (name === "NotAllowedError" || name === "PermissionDeniedError") {
+      throw new Error("麦克风权限被拒绝，请在系统/微信设置中允许使用麦克风");
+    }
+    if (name === "NotFoundError" || name === "DevicesNotFoundError") {
+      throw new Error("未检测到麦克风设备");
+    }
+    throw new Error(err?.message || "无法打开麦克风");
   }
 }
 
 async function startRecording() {
-  if (state.sending || state.asrBusy || state.recording) return;
-  if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder) {
-    alert("当前浏览器不支持录音");
-    return;
-  }
+  if (state.sending || state.asrBusy || state.recording) return false;
+  state.cancelRecord = false;
   try {
-    mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-  } catch {
-    alert("无法使用麦克风，请检查权限设置");
-    return;
+    mediaStream = await acquireMicStream();
+  } catch (err) {
+    alert(err.message || "无法开始录音");
+    return false;
   }
+
   recordChunks = [];
+  wavBuffers = [];
   const mime = pickRecorderMime();
-  try {
-    mediaRecorder = mime
-      ? new MediaRecorder(mediaStream, { mimeType: mime })
-      : new MediaRecorder(mediaStream);
-  } catch {
-    mediaStream.getTracks().forEach((t) => t.stop());
-    mediaStream = null;
-    alert("无法开始录音");
-    return;
+
+  if (window.MediaRecorder && (mime || true)) {
+    try {
+      mediaRecorder = mime
+        ? new MediaRecorder(mediaStream, { mimeType: mime })
+        : new MediaRecorder(mediaStream);
+      recordMode = "mediarecorder";
+      mediaRecorder.ondataavailable = (e) => {
+        if (e.data && e.data.size > 0) recordChunks.push(e.data);
+      };
+      mediaRecorder.start(250);
+      setRecordingUi(true);
+      return true;
+    } catch {
+      mediaRecorder = null;
+    }
   }
-  mediaRecorder.ondataavailable = (e) => {
-    if (e.data && e.data.size > 0) recordChunks.push(e.data);
-  };
-  mediaRecorder.onstop = async () => {
-    const mimeType = mediaRecorder?.mimeType || mime || "audio/webm";
+
+  // iOS / 部分微信：无 MediaRecorder 时用 AudioContext 录 WAV
+  try {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) throw new Error("no audio context");
+    audioCtx = new AC();
+    if (audioCtx.state === "suspended") await audioCtx.resume();
+    audioSource = audioCtx.createMediaStreamSource(mediaStream);
+    const bufferSize = 4096;
+    audioProcessor = audioCtx.createScriptProcessor(bufferSize, 1, 1);
+    wavSampleRate = audioCtx.sampleRate;
+    audioProcessor.onaudioprocess = (e) => {
+      const input = e.inputBuffer.getChannelData(0);
+      wavBuffers.push(new Float32Array(input));
+    };
+    const mute = audioCtx.createGain();
+    mute.gain.value = 0;
+    audioSource.connect(audioProcessor);
+    audioProcessor.connect(mute);
+    mute.connect(audioCtx.destination);
+    recordMode = "wav";
+    setRecordingUi(true);
+    return true;
+  } catch {
     mediaStream?.getTracks().forEach((t) => t.stop());
     mediaStream = null;
-    mediaRecorder = null;
+    alert("当前浏览器无法录音，请升级微信或改用系统 Safari / Chrome");
+    return false;
+  }
+}
+
+function cleanupMic() {
+  try {
+    audioProcessor?.disconnect();
+  } catch {
+    /* ignore */
+  }
+  try {
+    audioSource?.disconnect();
+  } catch {
+    /* ignore */
+  }
+  if (audioCtx) {
+    audioCtx.close().catch(() => {});
+  }
+  audioProcessor = null;
+  audioSource = null;
+  audioCtx = null;
+  mediaStream?.getTracks().forEach((t) => t.stop());
+  mediaStream = null;
+  mediaRecorder = null;
+  recordMode = "none";
+}
+
+async function stopRecording({ cancel = false } = {}) {
+  if (!state.recording && !mediaRecorder && recordMode === "none") {
     setRecordingUi(false);
-    if (!recordChunks.length) return;
+    return;
+  }
+  const shouldCancel = cancel || state.cancelRecord;
+  state.cancelRecord = shouldCancel;
+
+  if (recordMode === "mediarecorder" && mediaRecorder && mediaRecorder.state !== "inactive") {
+    await new Promise((resolve) => {
+      mediaRecorder.onstop = resolve;
+      try {
+        mediaRecorder.stop();
+      } catch {
+        resolve();
+      }
+    });
+    const mimeType = mediaRecorder.mimeType || pickRecorderMime() || "audio/webm";
+    cleanupMic();
+    setRecordingUi(false);
+    if (shouldCancel || !recordChunks.length) {
+      recordChunks = [];
+      return;
+    }
     const blob = new Blob(recordChunks, { type: mimeType });
     recordChunks = [];
     await transcribeAudio(blob, mimeType);
-  };
-  mediaRecorder.start();
-  setRecordingUi(true);
-}
-
-function stopRecording() {
-  if (!mediaRecorder || mediaRecorder.state === "inactive") {
-    setRecordingUi(false);
     return;
   }
-  mediaRecorder.stop();
+
+  if (recordMode === "wav") {
+    const chunks = wavBuffers;
+    const sr = wavSampleRate;
+    cleanupMic();
+    setRecordingUi(false);
+    wavBuffers = [];
+    if (shouldCancel || !chunks.length) return;
+    const blob = encodeWav(chunks, sr);
+    await transcribeAudio(blob, "audio/wav");
+  }
 }
 
 async function transcribeAudio(blob, mimeType) {
   state.asrBusy = true;
-  micBtn?.classList.add("busy");
-  if (voiceHint) {
-    voiceHint.classList.remove("hidden");
-    voiceHint.textContent = "正在识别语音…";
+  holdBtn?.classList.add("busy");
+  if (voiceOverlay) {
+    voiceOverlay.classList.remove("hidden");
+    voiceOverlay.classList.remove("canceling");
   }
+  if (voiceHint) voiceHint.textContent = "正在识别…";
   try {
     const dataUrl = await blobToBase64(blob);
     const data = await api("/api/asr", {
@@ -265,27 +502,87 @@ async function transcribeAudio(blob, mimeType) {
       alert("没有听清，请再说一次");
       return;
     }
-    const cur = inputEl.value.trim();
-    inputEl.value = cur ? `${cur}${text}` : text;
-    inputEl.style.height = "auto";
-    inputEl.style.height = Math.min(inputEl.scrollHeight, 160) + "px";
-    updateSendState();
-    inputEl.focus();
+    if (state.voiceMode) {
+      // 语音模式下识别后直接发送，贴近微信体感
+      inputEl.value = text;
+      updateSendState();
+      await sendMessage();
+    } else {
+      const cur = inputEl.value.trim();
+      inputEl.value = cur ? `${cur}${text}` : text;
+      inputEl.style.height = "auto";
+      inputEl.style.height = Math.min(inputEl.scrollHeight, 160) + "px";
+      updateSendState();
+      inputEl.focus();
+    }
   } catch (err) {
     alert(err.message || "语音识别失败");
   } finally {
     state.asrBusy = false;
-    micBtn?.classList.remove("busy");
-    if (voiceHint) voiceHint.classList.add("hidden");
+    holdBtn?.classList.remove("busy");
+    voiceOverlay?.classList.add("hidden");
   }
 }
 
-micBtn?.addEventListener("click", () => {
-  if (state.asrBusy) return;
-  if (state.recording) stopRecording();
-  else startRecording();
+function onHoldStart(e) {
+  if (state.sending || state.asrBusy) return;
+  e.preventDefault();
+  if (e.pointerId != null && holdBtn?.setPointerCapture) {
+    try {
+      holdBtn.setPointerCapture(e.pointerId);
+    } catch {
+      /* ignore */
+    }
+  }
+  holdPointerId = e.pointerId ?? null;
+  holdStartY = e.clientY ?? e.touches?.[0]?.clientY ?? 0;
+  startRecording();
+}
+
+function onHoldMove(e) {
+  if (!state.recording) return;
+  const y = e.clientY ?? e.touches?.[0]?.clientY ?? holdStartY;
+  const canceling = holdStartY - y > 60;
+  state.cancelRecord = canceling;
+  setRecordingUi(true, { canceling });
+}
+
+async function onHoldEnd(e) {
+  if (!state.recording && recordMode === "none") return;
+  e?.preventDefault?.();
+  const cancel = state.cancelRecord;
+  holdPointerId = null;
+  await stopRecording({ cancel });
+}
+
+modeBtn?.addEventListener("click", () => {
+  if (state.sending || state.asrBusy || state.recording) return;
+  const next = !state.voiceMode;
+  if (next) {
+    const reason = micBlockedReason();
+    if (reason && !isSecureForMic()) {
+      alert(reason);
+      refreshSecureHint();
+      return;
+    }
+  }
+  setVoiceMode(next);
 });
 
+if (holdBtn) {
+  holdBtn.addEventListener("pointerdown", onHoldStart);
+  holdBtn.addEventListener("pointermove", onHoldMove);
+  holdBtn.addEventListener("pointerup", onHoldEnd);
+  holdBtn.addEventListener("pointercancel", onHoldEnd);
+  holdBtn.addEventListener("contextmenu", (e) => e.preventDefault());
+}
+
+stopBtn?.addEventListener("click", () => {
+  if (!state.sending || !chatAbort) return;
+  chatAbort.abort();
+});
+
+refreshSecureHint();
 async function api(path, options = {}) {
   const headers = { ...(options.headers || {}) };
   if (options.body && !(options.body instanceof FormData)) {
@@ -570,7 +867,22 @@ function scrollBottom() {
 function updateSendState() {
   const hasText = !!inputEl.value.trim();
   const hasFile = state.attachments.length > 0;
-  sendBtn.disabled = state.sending || (!hasText && !hasFile) || !state.currentId;
+  const canSend =
+    !state.sending &&
+    !state.asrBusy &&
+    !state.recording &&
+    !!state.currentId &&
+    (hasText || hasFile) &&
+    !state.voiceMode;
+
+  sendBtn.disabled = !canSend;
+  sendBtn.classList.toggle("hidden", state.sending);
+  stopBtn?.classList.toggle("hidden", !state.sending);
+
+  if (attachBtn) attachBtn.disabled = state.sending || state.recording || state.asrBusy;
+  if (modeBtn) modeBtn.disabled = state.sending || state.recording || state.asrBusy;
+  if (holdBtn) holdBtn.disabled = state.sending || state.asrBusy;
+  if (inputEl) inputEl.readOnly = state.sending;
 }
 
 function clearAttachments() {
@@ -668,12 +980,14 @@ inputEl.addEventListener("input", () => {
 inputEl.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !e.shiftKey) {
     e.preventDefault();
+    if (state.sending) return;
     if (!sendBtn.disabled) sendMessage();
   }
 });
 
 // 粘贴图片/文件（剪贴板 items + files）
 inputEl.addEventListener("paste", async (e) => {
+  if (state.sending) return;
   const cd = e.clipboardData;
   if (!cd) return;
 
@@ -706,12 +1020,14 @@ inputEl.addEventListener("paste", async (e) => {
 inputEl.addEventListener("drop", async (e) => {
   e.preventDefault();
   e.stopPropagation();
+  if (state.sending) return;
   const files = [...(e.dataTransfer?.files || [])];
   if (files.length) await addFiles(files);
 });
 
 $("#composer").addEventListener("submit", (e) => {
   e.preventDefault();
+  if (state.sending) return;
   sendMessage();
 });
 
@@ -723,6 +1039,7 @@ async function sendMessage() {
   messagesEl.querySelector(".welcome")?.remove();
 
   state.sending = true;
+  chatAbort = new AbortController();
   updateSendState();
   inputEl.value = "";
   inputEl.style.height = "auto";
@@ -740,6 +1057,7 @@ async function sendMessage() {
   const bubble = appendBubble("assistant", "正在连接…", { markdown: true, streaming: true });
   bubble.dataset.status = "1";
 
+  let aborted = false;
   try {
     const res = await fetch(`/api/sessions/${state.currentId}/chat`, {
       method: "POST",
@@ -755,6 +1073,7 @@ async function sendMessage() {
           data: a.data,
         })),
       }),
+      signal: chatAbort.signal,
     });
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
@@ -771,7 +1090,22 @@ async function sendMessage() {
     let lastRender = 0;
 
     while (true) {
-      const { done, value } = await reader.read();
+      let readResult;
+      try {
+        readResult = await reader.read();
+      } catch (err) {
+        if (err?.name === "AbortError" || chatAbort?.signal?.aborted) {
+          aborted = true;
+          try {
+            await reader.cancel();
+          } catch {
+            /* ignore */
+          }
+          break;
+        }
+        throw err;
+      }
+      const { done, value } = readResult;
       if (done) break;
       buffer += decoder.decode(value, { stream: true });
       const parts = buffer.split("\n\n");
@@ -816,7 +1150,15 @@ async function sendMessage() {
         }
       }
     }
-    if (finalText) {
+
+    if (aborted) {
+      const partial = finalText.trim();
+      setBubbleContent(
+        bubble,
+        partial ? `${partial}\n\n（已停止生成）` : "（已停止生成）",
+        { markdown: !!partial, streaming: false }
+      );
+    } else if (finalText) {
       setBubbleContent(bubble, finalText, { markdown: true, streaming: false });
     } else if (!bubble.textContent || bubble.dataset.status === "1") {
       setBubbleContent(bubble, "（无回复）", { markdown: false, streaming: false });
@@ -826,14 +1168,19 @@ async function sendMessage() {
     const cur = state.sessions.find((s) => s.id === state.currentId);
     if (cur) chatTitle.textContent = cur.title || "新对话";
   } catch (err) {
-    setBubbleContent(bubble, `抱歉，出错了：${err.message}`, { markdown: false, streaming: false });
+    if (err?.name === "AbortError" || chatAbort?.signal?.aborted) {
+      setBubbleContent(bubble, "（已停止生成）", { markdown: false, streaming: false });
+    } else {
+      setBubbleContent(bubble, `抱歉，出错了：${err.message}`, { markdown: false, streaming: false });
+    }
   } finally {
     for (const a of pending) {
       if (a.previewUrl) URL.revokeObjectURL(a.previewUrl);
     }
+    chatAbort = null;
     state.sending = false;
     updateSendState();
-    inputEl.focus();
+    if (!state.voiceMode) inputEl.focus();
   }
 }
 
