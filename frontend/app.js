@@ -11,6 +11,7 @@ const state = {
   asrBusy: false,
   voiceMode: false,
   cancelRecord: false,
+  autoTts: localStorage.getItem("grape_auto_tts") === "1",
 };
 
 const MAX_ATTACH = 5;
@@ -34,6 +35,7 @@ const sendBtn = $("#send-btn");
 const stopBtn = $("#stop-btn");
 const chatTitle = $("#chat-title");
 const deleteBtn = $("#delete-session-btn");
+const autoTtsBtn = $("#auto-tts-btn");
 const fileInput = $("#file-input");
 const attachPreview = $("#attach-preview");
 const sidebar = $("#sidebar");
@@ -129,6 +131,11 @@ function attachTtsButton(bubble) {
 function stopCurrentAudio() {
   if (currentAudio) {
     currentAudio.pause();
+    try {
+      currentAudio.currentTime = 0;
+    } catch {
+      /* ignore */
+    }
     currentAudio = null;
   }
   document.querySelectorAll(".btn-tts.playing").forEach((b) => {
@@ -137,9 +144,47 @@ function stopCurrentAudio() {
   });
 }
 
+function syncAutoTtsButton() {
+  if (!autoTtsBtn) return;
+  autoTtsBtn.classList.toggle("on", state.autoTts);
+  autoTtsBtn.setAttribute("aria-pressed", state.autoTts ? "true" : "false");
+  autoTtsBtn.title = state.autoTts ? "关闭自动播报" : "开启自动播报";
+  autoTtsBtn.setAttribute("aria-label", autoTtsBtn.title);
+}
+
+async function unlockAudioPlayback() {
+  // 用户手势内解锁，后续自动播报才不容易被浏览器拦截
+  try {
+    const silent = new Audio(
+      "data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA"
+    );
+    silent.volume = 0.01;
+    await silent.play();
+    silent.pause();
+  } catch {
+    /* ignore */
+  }
+}
+
+function maybeAutoPlayTts(bubble) {
+  if (!state.autoTts || !bubble) return;
+  const text = (bubble.dataset.rawText || "").trim();
+  if (!text) return;
+  if (text.startsWith("抱歉") || text.startsWith("（已停止") || text === "（无回复）") return;
+  const btn = bubble.querySelector(".btn-tts");
+  if (!btn) {
+    attachTtsButton(bubble);
+  }
+  const ttsBtn = bubble.querySelector(".btn-tts");
+  if (ttsBtn) {
+    // 稍延后，等 DOM/markdown 稳定
+    setTimeout(() => playTts(bubble, ttsBtn), 80);
+  }
+}
+
 async function playTts(bubble, btn) {
   const text = (bubble.dataset.rawText || bubble.textContent || "").trim();
-  if (!text || text.startsWith("抱歉") || text === "（无回复）") return;
+  if (!text || text.startsWith("抱歉") || text === "（无回复）" || text.startsWith("（已停止")) return;
 
   if (btn.classList.contains("playing") && currentAudio) {
     stopCurrentAudio();
@@ -177,9 +222,24 @@ async function playTts(bubble, btn) {
   } catch (err) {
     btn.classList.remove("loading", "playing");
     btn.textContent = "🔊";
-    alert(err.message || "语音合成失败");
+    // 自动播报被拦截时不弹窗打扰
+    if (!state.autoTts || err?.name !== "NotAllowedError") {
+      alert(err.message || "语音合成失败");
+    }
   }
 }
+
+autoTtsBtn?.addEventListener("click", async () => {
+  state.autoTts = !state.autoTts;
+  localStorage.setItem("grape_auto_tts", state.autoTts ? "1" : "0");
+  syncAutoTtsButton();
+  if (state.autoTts) {
+    await unlockAudioPlayback();
+  } else {
+    stopCurrentAudio();
+  }
+});
+syncAutoTtsButton();
 
 function blobToBase64(blob) {
   return new Promise((resolve, reject) => {
@@ -1210,6 +1270,7 @@ async function sendMessage() {
       );
     } else if (finalText) {
       setBubbleContent(bubble, finalText, { markdown: true, streaming: false });
+      maybeAutoPlayTts(bubble);
     } else if (!bubble.textContent || bubble.dataset.status === "1") {
       setBubbleContent(bubble, "（无回复）", { markdown: false, streaming: false });
     }
