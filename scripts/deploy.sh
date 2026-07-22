@@ -65,15 +65,11 @@ if ! command -v caddy >/dev/null 2>&1; then
   curl -fsSL "https://caddyserver.com/api/download?os=linux&arch=amd64" -o /usr/local/bin/caddy
   chmod +x /usr/local/bin/caddy
 fi
-mkdir -p /etc/caddy
+mkdir -p /etc/caddy /var/lib/caddy /var/log/caddy
 cat > /etc/caddy/Caddyfile <<CADDY
 ${HTTPS_HOST} {
   encode gzip
   reverse_proxy 127.0.0.1:${PORT}
-}
-
-http:// {
-  redir https://${HTTPS_HOST}{uri} permanent
 }
 CADDY
 
@@ -85,13 +81,16 @@ Wants=grape-doctor.service
 
 [Service]
 Type=simple
+User=root
+Environment=HOME=/var/lib/caddy
+Environment=XDG_CONFIG_HOME=/var/lib/caddy/config
+Environment=XDG_DATA_HOME=/var/lib/caddy/data
+WorkingDirectory=/var/lib/caddy
 ExecStart=/usr/local/bin/caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
 ExecReload=/usr/local/bin/caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile
 Restart=always
 RestartSec=3
 LimitNOFILE=1048576
-AmbientCapabilities=CAP_NET_BIND_SERVICE
-CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 
 [Install]
 WantedBy=multi-user.target
@@ -102,12 +101,12 @@ systemctl enable grape-doctor caddy >/dev/null
 systemctl restart grape-doctor
 sleep 1
 systemctl restart caddy
-sleep 4
+sleep 6
 systemctl --no-pager --full status grape-doctor | head -14
 systemctl --no-pager --full status caddy | head -16
 curl -sf http://127.0.0.1:${PORT}/api/health
 echo
-curl -sfk https://127.0.0.1/api/health -H "Host: ${HTTPS_HOST}" || echo "(HTTPS 健康检查稍后可用，请确认安全组已放行 80/443)"
+curl -sf --max-time 20 https://${HTTPS_HOST}/api/health || echo "(若 HTTPS 失败，请确认云安全组已放行 80/443)"
 echo
 echo "文字聊天可用: http://${HOST}:${PORT}"
 echo "语音请用 HTTPS: https://${HTTPS_HOST}"
