@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>葡萄个人助手家庭版</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;500;600;700;800&family=Noto+Sans+SC:wght@400;500;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <div class="bg-grid" aria-hidden="true"></div>
+  <div class="bg-orb orb-a" aria-hidden="true"></div>
+  <div class="bg-orb orb-b" aria-hidden="true"></div>
+  <div class="bg-orb orb-c" aria-hidden="true"></div>
+
+  <!-- Login -->
+  <section id="login-view" class="view login-view">
+    <header class="login-hero">
+      <div class="brand-mark" aria-hidden="true">
+        <span class="grape-core"></span>
+        <span class="grape-ring"></span>
+      </div>
+      <h1 class="brand-title">葡萄个人助手家庭版</h1>
+      <p class="brand-sub">家庭医生咨询 · 智能健康生活助手</p>
+    </header>
+
+    <div class="login-panel">
+      <p class="panel-label">选择家庭成员</p>
+      <div id="member-grid" class="member-grid"></div>
+
+      <form id="login-form" class="login-form hidden">
+        <div class="selected-chip" id="selected-chip"></div>
+        <label class="field">
+          <span id="password-label">设置登录密码</span>
+          <input id="password-input" type="password" autocomplete="current-password" placeholder="至少 4 位" minlength="4" required />
+        </label>
+        <p id="login-hint" class="hint">首次进入请设置专属密码，之后需输入密码进入私有对话。</p>
+        <p id="login-error" class="error hidden"></p>
+        <button type="submit" class="btn-primary" id="login-btn">进入助手</button>
+        <button type="button" class="btn-ghost" id="back-btn">重新选择</button>
+      </form>
+    </div>
+  </section>
+
+  <!-- Chat -->
+  <section id="chat-view" class="view chat-view hidden">
+    <aside class="sidebar">
+      <div class="side-brand">
+        <div class="brand-mark sm" aria-hidden="true">
+          <span class="grape-core"></span>
+          <span class="grape-ring"></span>
+        </div>
+        <div>
+          <div class="side-title">葡萄助手</div>
+          <div class="side-user" id="side-user"></div>
+        </div>
+      </div>
+      <button class="btn-new" id="new-session-btn">＋ 新对话</button>
+      <div class="session-list" id="session-list"></div>
+      <button class="btn-logout" id="logout-btn">退出登录</button>
+    </aside>
+
+    <main class="chat-main">
+      <header class="chat-top">
+        <div>
+          <h2 id="chat-title">新对话</h2>
+          <p class="model-tag">Cursor Cloud · grok-4.5</p>
+        </div>
+        <button class="btn-icon danger hidden" id="delete-session-btn" title="删除当前对话">删除对话</button>
+      </header>
+
+      <div class="messages" id="messages">
+        <div class="welcome" id="welcome">
+          <div class="welcome-glow"></div>
+          <h3>你好，我是葡萄家庭健康助手</h3>
+          <p>可以问我感冒发烧、用药提醒、饮食作息，或其他生活问题。紧急情况请直接就医或拨打急救电话。</p>
+          <div class="suggests">
+            <button type="button" data-q="孩子晚上咳嗽，有点发烧怎么办？">孩子咳嗽发烧</button>
+            <button type="button" data-q="高血压平时饮食要注意什么？">高血压饮食</button>
+            <button type="button" data-q="最近睡眠不好，有什么改善建议？">改善睡眠</button>
+          </div>
+        </div>
+      </div>
+
+      <form class="composer" id="composer">
+        <textarea id="input" rows="1" placeholder="描述症状或问题，按 Enter 发送…" maxlength="8000"></textarea>
+        <button type="submit" class="btn-send" id="send-btn" disabled>
+          <span>发送</span>
+        </button>
+      </form>
+    </main>
+  </section>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
