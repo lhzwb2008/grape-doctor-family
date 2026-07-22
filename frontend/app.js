@@ -410,16 +410,15 @@ function readFileAsBase64(file) {
 
 $("#attach-btn").addEventListener("click", () => fileInput.click());
 
-fileInput.addEventListener("change", async () => {
-  const files = [...(fileInput.files || [])];
-  fileInput.value = "";
+async function addFiles(fileList) {
+  const files = [...(fileList || [])];
   for (const file of files) {
     if (state.attachments.length >= MAX_ATTACH) {
       alert(`一次最多 ${MAX_ATTACH} 个附件`);
       break;
     }
     if (file.size > MAX_FILE_SIZE) {
-      alert(`${file.name} 超过 12MB，已跳过`);
+      alert(`${file.name || "文件"} 超过 12MB，已跳过`);
       continue;
     }
     try {
@@ -428,7 +427,7 @@ fileInput.addEventListener("change", async () => {
       const isImage = mime.startsWith("image/");
       state.attachments.push({
         id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
-        name: file.name,
+        name: file.name || `paste-${Date.now()}${isImage ? ".png" : ""}`,
         mime,
         data: dataUrl,
         previewUrl: isImage ? URL.createObjectURL(file) : null,
@@ -440,6 +439,11 @@ fileInput.addEventListener("change", async () => {
   }
   renderAttachPreview();
   updateSendState();
+}
+
+fileInput.addEventListener("change", async () => {
+  await addFiles(fileInput.files);
+  fileInput.value = "";
 });
 
 inputEl.addEventListener("input", () => {
@@ -455,32 +459,42 @@ inputEl.addEventListener("keydown", (e) => {
   }
 });
 
-// 粘贴图片
+// 粘贴图片/文件（剪贴板 items + files）
 inputEl.addEventListener("paste", async (e) => {
-  const items = [...(e.clipboardData?.items || [])];
-  const images = items.filter((i) => i.type.startsWith("image/"));
-  if (!images.length) return;
-  e.preventDefault();
-  for (const item of images) {
-    if (state.attachments.length >= MAX_ATTACH) break;
-    const file = item.getAsFile();
-    if (!file) continue;
-    if (file.size > MAX_FILE_SIZE) {
-      alert("粘贴图片超过 12MB");
-      continue;
-    }
-    const dataUrl = await readFileAsBase64(file);
-    state.attachments.push({
-      id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
-      name: file.name || `paste-${Date.now()}.png`,
-      mime: file.type || "image/png",
-      data: dataUrl,
-      previewUrl: URL.createObjectURL(file),
-      kind: "image",
-    });
+  const cd = e.clipboardData;
+  if (!cd) return;
+
+  const fromItems = [...(cd.items || [])]
+    .filter((i) => i.kind === "file")
+    .map((i) => i.getAsFile())
+    .filter(Boolean);
+  const fromFiles = [...(cd.files || [])];
+  const seen = new Set();
+  const files = [];
+  for (const f of [...fromItems, ...fromFiles]) {
+    const key = `${f.name}-${f.size}-${f.lastModified || 0}-${f.type}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    files.push(f);
   }
-  renderAttachPreview();
-  updateSendState();
+  if (!files.length) return;
+
+  e.preventDefault();
+  await addFiles(files);
+});
+
+// 拖拽文件到输入区
+["dragenter", "dragover"].forEach((evt) => {
+  inputEl.addEventListener(evt, (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+  });
+});
+inputEl.addEventListener("drop", async (e) => {
+  e.preventDefault();
+  e.stopPropagation();
+  const files = [...(e.dataTransfer?.files || [])];
+  if (files.length) await addFiles(files);
 });
 
 $("#composer").addEventListener("submit", (e) => {
