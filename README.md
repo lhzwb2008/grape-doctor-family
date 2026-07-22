@@ -5,7 +5,7 @@
 ## 本地启动
 
 ```bash
-cd /Users/Wezhang/workspace/doctor
+cd /Users/Wezhang/workspace/grape-doctor-family
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
