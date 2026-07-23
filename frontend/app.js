@@ -53,6 +53,8 @@ let mediaRecorder = null;
 let mediaStream = null;
 let recordChunks = [];
 let currentAudio = null;
+let sharedAudio = null; // 复用同一 Audio，避免自动播报被浏览器拦截
+let audioUnlocked = false;
 let chatAbort = null;
 let recordMode = "none"; // mediarecorder | wav
 let audioCtx = null;
@@ -130,16 +132,16 @@ function attachTtsButton(bubble) {
 
 function stopCurrentAudio() {
   if (currentAudio) {
-    currentAudio.pause();
     try {
+      currentAudio.pause();
       currentAudio.currentTime = 0;
     } catch {
       /* ignore */
     }
     currentAudio = null;
   }
-  document.querySelectorAll(".btn-tts.playing").forEach((b) => {
-    b.classList.remove("playing");
+  document.querySelectorAll(".btn-tts.playing, .btn-tts.loading").forEach((b) => {
+    b.classList.remove("playing", "loading");
     b.textContent = "🔊";
   });
 }
@@ -150,17 +152,33 @@ function syncAutoTtsButton() {
   autoTtsBtn.setAttribute("aria-pressed", state.autoTts ? "true" : "false");
   autoTtsBtn.title = state.autoTts ? "关闭自动播报" : "开启自动播报";
   autoTtsBtn.setAttribute("aria-label", autoTtsBtn.title);
+  autoTtsBtn.innerHTML = state.autoTts
+    ? '<span class="ico" aria-hidden="true">🔊</span><span class="lbl">自动</span>'
+    : '<span class="ico" aria-hidden="true">🔇</span>';
 }
 
 async function unlockAudioPlayback() {
-  // 用户手势内解锁，后续自动播报才不容易被浏览器拦截
+  // 必须在用户手势里完成；后续自动播报复用同一 Audio 实例
   try {
-    const silent = new Audio(
-      "data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA"
-    );
-    silent.volume = 0.01;
-    await silent.play();
-    silent.pause();
+    if (!sharedAudio) sharedAudio = new Audio();
+    sharedAudio.src =
+      "data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA";
+    sharedAudio.volume = 0.01;
+    await sharedAudio.play();
+    sharedAudio.pause();
+    sharedAudio.currentTime = 0;
+    audioUnlocked = true;
+  } catch {
+    audioUnlocked = false;
+  }
+  try {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (AC) {
+      if (!window.__grapeAudioCtx) window.__grapeAudioCtx = new AC();
+      if (window.__grapeAudioCtx.state === "suspended") {
+        await window.__grapeAudioCtx.resume();
+      }
+    }
   } catch {
     /* ignore */
   }
@@ -171,22 +189,18 @@ function maybeAutoPlayTts(bubble) {
   const text = (bubble.dataset.rawText || "").trim();
   if (!text) return;
   if (text.startsWith("抱歉") || text.startsWith("（已停止") || text === "（无回复）") return;
-  const btn = bubble.querySelector(".btn-tts");
-  if (!btn) {
-    attachTtsButton(bubble);
-  }
+  if (!bubble.querySelector(".btn-tts")) attachTtsButton(bubble);
   const ttsBtn = bubble.querySelector(".btn-tts");
-  if (ttsBtn) {
-    // 稍延后，等 DOM/markdown 稳定
-    setTimeout(() => playTts(bubble, ttsBtn), 80);
-  }
+  if (!ttsBtn) return;
+  // 立刻排队，不额外拖长手势失效窗口；合成请求异步进行
+  playTts(bubble, ttsBtn, { auto: true });
 }
 
-async function playTts(bubble, btn) {
+async function playTts(bubble, btn, { auto = false } = {}) {
   const text = (bubble.dataset.rawText || bubble.textContent || "").trim();
   if (!text || text.startsWith("抱歉") || text === "（无回复）" || text.startsWith("（已停止")) return;
 
-  if (btn.classList.contains("playing") && currentAudio) {
+  if (!auto && btn.classList.contains("playing") && currentAudio) {
     stopCurrentAudio();
     return;
   }
@@ -195,6 +209,9 @@ async function playTts(bubble, btn) {
   btn.classList.add("loading");
   btn.textContent = "…";
   try {
+    if (auto && !audioUnlocked) {
+      await unlockAudioPlayback();
+    }
     let audioUrl = bubble.dataset.ttsUrl;
     if (!audioUrl) {
       const data = await api("/api/tts", {
@@ -204,7 +221,13 @@ async function playTts(bubble, btn) {
       audioUrl = `data:${data.mime || "audio/mpeg"};base64,${data.audio}`;
       bubble.dataset.ttsUrl = audioUrl;
     }
-    const audio = new Audio(audioUrl);
+    if (!sharedAudio) sharedAudio = new Audio();
+    const audio = sharedAudio;
+    // 换源前清掉旧监听，避免串台
+    audio.onended = null;
+    audio.onerror = null;
+    audio.src = audioUrl;
+    audio.volume = 1;
     currentAudio = audio;
     btn.classList.remove("loading");
     btn.classList.add("playing");
@@ -216,16 +239,22 @@ async function playTts(bubble, btn) {
     };
     audio.onerror = () => {
       stopCurrentAudio();
-      alert("语音播放失败");
+      if (!auto) alert("语音播放失败");
     };
     await audio.play();
+    audioUnlocked = true;
   } catch (err) {
     btn.classList.remove("loading", "playing");
     btn.textContent = "🔊";
-    // 自动播报被拦截时不弹窗打扰
-    if (!state.autoTts || err?.name !== "NotAllowedError") {
-      alert(err.message || "语音合成失败");
+    if (auto && (err?.name === "NotAllowedError" || /interact|user gesture|not allowed/i.test(String(err?.message || "")))) {
+      // 自动播报被拦截：提示一次并关掉自动，避免静默失败
+      state.autoTts = false;
+      localStorage.setItem("grape_auto_tts", "0");
+      syncAutoTtsButton();
+      alert("浏览器拦截了自动播报，请再点一次右上角开启，并保持页面互动");
+      return;
     }
+    if (!auto) alert(err.message || "语音合成失败");
   }
 }
 
@@ -1150,6 +1179,8 @@ async function sendMessage() {
 
   state.sending = true;
   chatAbort = new AbortController();
+  // 发送手势里再解锁一次，提高自动播报成功率（尤其微信）
+  if (state.autoTts) unlockAudioPlayback();
   updateSendState();
   inputEl.value = "";
   inputEl.style.height = "auto";
