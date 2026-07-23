@@ -202,15 +202,43 @@ function stripTextForSpeech(text) {
     .trim();
 }
 
+function normalizeSpeechText(text) {
+  // 1.45 -> 1点45，避免被当成英文句号拆开，也更利于中文朗读
+  return stripTextForSpeech(text).replace(/(\d)\.(\d)/g, "$1点$2");
+}
+
+function isSentenceBreak(text, index) {
+  const ch = text[index];
+  if ("。！？；!?\n".includes(ch)) return true;
+  if (ch !== ".") return false;
+  const prev = index > 0 ? text[index - 1] : "";
+  const next = index + 1 < text.length ? text[index + 1] : "";
+  if (/\d/.test(prev) && /\d/.test(next)) return false;
+  if (/[A-Za-z0-9]/.test(prev) && /\d/.test(next)) return false;
+  if (prev === "." || next === ".") return false;
+  return true;
+}
+
 function splitSpeechSegments(text, maxChars = 72) {
-  const clean = stripTextForSpeech(text);
+  const clean = normalizeSpeechText(text);
   if (!clean) return [];
   const parts = [];
   let buf = "";
-  for (const ch of clean) {
+  for (let i = 0; i < clean.length; i++) {
+    const ch = clean[i];
     buf += ch;
-    const atBreak = "。！？；!?.;".includes(ch);
-    if ((atBreak || buf.length >= maxChars) && buf.trim()) {
+    const atBreak = isSentenceBreak(clean, i);
+    const tooLong = buf.length >= maxChars;
+    if (tooLong && !atBreak) {
+      const candidates = ["，", "、", "；", ",", " "].map((x) => buf.lastIndexOf(x));
+      const cut = Math.max(...candidates);
+      if (cut >= 12) {
+        parts.push(buf.slice(0, cut + 1).trim());
+        buf = buf.slice(cut + 1);
+        continue;
+      }
+    }
+    if ((atBreak || tooLong) && buf.trim()) {
       parts.push(buf.trim());
       buf = "";
     }
@@ -266,6 +294,7 @@ function playBlob(blob) {
     if (!sharedAudio) sharedAudio = new Audio();
     const audio = sharedAudio;
     const url = URL.createObjectURL(blob);
+    let settled = false;
     const cleanup = () => {
       try {
         URL.revokeObjectURL(url);
@@ -273,27 +302,60 @@ function playBlob(blob) {
         /* ignore */
       }
     };
+    const finish = (err) => {
+      if (settled) return;
+      settled = true;
+      audio.onended = null;
+      audio.onerror = null;
+      audio.oncanplay = null;
+      if (currentAudio === audio) currentAudio = null;
+      cleanup();
+      if (err) reject(err);
+      else resolve();
+    };
+
     audio.onended = null;
     audio.onerror = null;
+    audio.oncanplay = null;
+    audio.pause();
+    try {
+      audio.currentTime = 0;
+    } catch {
+      /* ignore */
+    }
     audio.src = url;
     audio.volume = 1;
     currentAudio = audio;
-    audio.onended = () => {
-      if (currentAudio === audio) currentAudio = null;
-      cleanup();
-      resolve();
+
+    audio.onended = () => finish();
+    audio.onerror = () => finish(new Error("语音播放失败"));
+    // 等缓冲好再播，避免句首被裁掉几个字
+    const startPlay = () => {
+      try {
+        audio.currentTime = 0;
+      } catch {
+        /* ignore */
+      }
+      audio
+        .play()
+        .then(() => {
+          audioUnlocked = true;
+        })
+        .catch((err) => finish(err));
     };
-    audio.onerror = () => {
-      if (currentAudio === audio) currentAudio = null;
-      cleanup();
-      reject(new Error("语音播放失败"));
-    };
-    audio.play().then(() => {
-      audioUnlocked = true;
-    }).catch((err) => {
-      cleanup();
-      reject(err);
-    });
+    if (audio.readyState >= 3) {
+      startPlay();
+    } else {
+      audio.oncanplay = () => {
+        audio.oncanplay = null;
+        startPlay();
+      };
+      try {
+        audio.load();
+      } catch {
+        startPlay();
+      }
+    }
   });
 }
 

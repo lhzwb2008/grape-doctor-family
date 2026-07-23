@@ -144,20 +144,54 @@ def strip_for_speech(text: str) -> str:
     return t
 
 
+def normalize_speech_text(text: str) -> str:
+    """朗读前规范化：小数点改成「点」，避免被拆句/误读。"""
+    t = strip_for_speech(text)
+    # 1.45 / 37.5 -> 1点45 / 37点5
+    t = re.sub(r"(?<=\d)\.(?=\d)", "点", t)
+    return t
+
+
+def _is_sentence_break(text: str, index: int) -> bool:
+    ch = text[index]
+    if ch in "。！？；!?\n":
+        return True
+    if ch != ".":
+        return False
+    prev = text[index - 1] if index > 0 else ""
+    nxt = text[index + 1] if index + 1 < len(text) else ""
+    # 小数/版本号：1.45、v2.0
+    if prev.isdigit() and nxt.isdigit():
+        return False
+    if prev.isalnum() and nxt.isdigit():
+        return False
+    # 省略号
+    if prev == "." or nxt == ".":
+        return False
+    return True
+
+
 def split_speech_segments(text: str, *, max_chars: int = 72) -> list[str]:
     """按句拆分，控制单段长度，降低首包等待。"""
-    clean = strip_for_speech(text)
+    clean = normalize_speech_text(text)
     if not clean:
         return []
     parts: list[str] = []
     buf: list[str] = []
-    for ch in clean:
+    for i, ch in enumerate(clean):
         buf.append(ch)
         joined = "".join(buf)
-        at_break = ch in "。！？；!?.;\n"
+        at_break = _is_sentence_break(clean, i)
         too_long = len(joined) >= max_chars
+        if too_long and not at_break:
+            # 超长时优先在逗号/顿号处切开，避免切断数字
+            cut = max(joined.rfind("，"), joined.rfind("、"), joined.rfind("；"), joined.rfind(","), joined.rfind(" "))
+            if cut >= 12:
+                parts.append(joined[: cut + 1].strip())
+                buf = list(joined[cut + 1 :])
+                continue
         if at_break or too_long:
-            seg = joined.strip()
+            seg = "".join(buf).strip()
             if seg:
                 parts.append(seg)
             buf = []
@@ -180,7 +214,7 @@ def split_speech_segments(text: str, *, max_chars: int = 72) -> list[str]:
 
 def synthesize(text: str) -> tuple[bytes, str, dict[str, float | int]]:
     """文本转语音，返回 (audio_bytes, mime, timing)。"""
-    clean = strip_for_speech(text)
+    clean = normalize_speech_text(text)
     if not clean:
         raise ValueError("没有可朗读的文本")
     if len(clean) > 500:
