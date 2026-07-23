@@ -1252,7 +1252,10 @@ inputEl.addEventListener("input", () => {
 });
 
 inputEl.addEventListener("keydown", (e) => {
-  if (e.key === "Enter" && !e.shiftKey) {
+  // 中文输入法选词常按回车；改为 Option/Alt+Enter 发送，普通回车换行
+  if (e.key !== "Enter") return;
+  if (e.isComposing || e.keyCode === 229) return;
+  if (e.altKey || e.metaKey) {
     e.preventDefault();
     if (state.sending) return;
     if (!sendBtn.disabled) sendMessage();
