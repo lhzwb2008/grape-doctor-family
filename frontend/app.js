@@ -1548,4 +1548,446 @@ async function init() {
   showLogin();
 }
 
+/* —— 打电话模式（百炼 Omni Realtime） —— */
+const callOverlay = $("#call-overlay");
+const callStatusEl = $("#call-status");
+const callTimerEl = $("#call-timer");
+const callTranscriptEl = $("#call-transcript");
+const callAvatarEl = $("#call-avatar");
+const callBtn = $("#call-btn");
+const callMuteBtn = $("#call-mute-btn");
+const callHangBtn = $("#call-hang-btn");
+
+const callState = {
+  active: false,
+  ws: null,
+  stream: null,
+  micCtx: null,
+  micProcessor: null,
+  micSource: null,
+  playCtx: null,
+  playTime: 0,
+  playSources: [],
+  muted: false,
+  timerId: null,
+  startedAt: 0,
+  notes: [],
+  userPartial: "",
+  assistantPartial: "",
+  userBubble: null,
+  assistantBubble: null,
+};
+
+function setCallStatus(text) {
+  if (callStatusEl) callStatusEl.textContent = text;
+}
+
+function fmtCallTimer(ms) {
+  const s = Math.floor(ms / 1000);
+  const mm = String(Math.floor(s / 60)).padStart(2, "0");
+  const ss = String(s % 60).padStart(2, "0");
+  return `${mm}:${ss}`;
+}
+
+function b64FromBytes(bytes) {
+  let bin = "";
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    bin += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+  }
+  return btoa(bin);
+}
+
+function bytesFromB64(b64) {
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+function downsampleTo16k(float32, fromRate) {
+  if (fromRate === 16000) return float32;
+  const ratio = fromRate / 16000;
+  const newLen = Math.floor(float32.length / ratio);
+  const result = new Float32Array(newLen);
+  for (let i = 0; i < newLen; i++) {
+    const idx = Math.floor(i * ratio);
+    result[i] = float32[idx] || 0;
+  }
+  return result;
+}
+
+function floatTo16BitPCM(float32) {
+  const buf = new Int16Array(float32.length);
+  for (let i = 0; i < float32.length; i++) {
+    let s = Math.max(-1, Math.min(1, float32[i]));
+    buf[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+  }
+  return buf;
+}
+
+function stopCallPlayback() {
+  for (const src of callState.playSources) {
+    try {
+      src.stop();
+    } catch {
+      /* ignore */
+    }
+  }
+  callState.playSources = [];
+  if (callState.playCtx) {
+    callState.playTime = callState.playCtx.currentTime;
+  }
+  callAvatarEl?.classList.remove("speaking");
+}
+
+function enqueueCallPcm(int16Bytes) {
+  if (!callState.playCtx) {
+    callState.playCtx = new (window.AudioContext || window.webkitAudioContext)({
+      sampleRate: 24000,
+    });
+    callState.playTime = callState.playCtx.currentTime;
+  }
+  const ctx = callState.playCtx;
+  if (ctx.state === "suspended") ctx.resume().catch(() => {});
+  const samples = new Int16Array(
+    int16Bytes.buffer,
+    int16Bytes.byteOffset,
+    Math.floor(int16Bytes.byteLength / 2)
+  );
+  if (!samples.length) return;
+  const f32 = new Float32Array(samples.length);
+  for (let i = 0; i < samples.length; i++) f32[i] = samples[i] / 32768;
+  const buffer = ctx.createBuffer(1, f32.length, 24000);
+  buffer.copyToChannel(f32, 0);
+  const src = ctx.createBufferSource();
+  src.buffer = buffer;
+  src.connect(ctx.destination);
+  const startAt = Math.max(ctx.currentTime + 0.02, callState.playTime);
+  src.start(startAt);
+  callState.playTime = startAt + buffer.duration;
+  callState.playSources.push(src);
+  src.onended = () => {
+    callState.playSources = callState.playSources.filter((s) => s !== src);
+    if (!callState.playSources.length) callAvatarEl?.classList.remove("speaking");
+  };
+  callAvatarEl?.classList.add("speaking");
+}
+
+function appendCallLine(role, text, { replace = false } = {}) {
+  if (!callTranscriptEl || !text) return null;
+  let el =
+    role === "user" ? callState.userBubble : callState.assistantBubble;
+  if (!replace || !el) {
+    el = document.createElement("div");
+    el.className = `call-line ${role}`;
+    callTranscriptEl.appendChild(el);
+    if (role === "user") callState.userBubble = el;
+    else callState.assistantBubble = el;
+  }
+  el.textContent = text;
+  callTranscriptEl.scrollTop = callTranscriptEl.scrollHeight;
+  return el;
+}
+
+function sendCallEvent(obj) {
+  if (!callState.ws || callState.ws.readyState !== WebSocket.OPEN) return;
+  callState.ws.send(JSON.stringify(obj));
+}
+
+async function startMicToCall() {
+  const stream = await navigator.mediaDevices.getUserMedia({
+    audio: {
+      echoCancellation: true,
+      noiseSuppression: true,
+      autoGainControl: true,
+      channelCount: 1,
+    },
+  });
+  callState.stream = stream;
+  const ctx = new (window.AudioContext || window.webkitAudioContext)();
+  callState.micCtx = ctx;
+  if (ctx.state === "suspended") await ctx.resume();
+  const source = ctx.createMediaStreamSource(stream);
+  callState.micSource = source;
+  const processor = ctx.createScriptProcessor(4096, 1, 1);
+  callState.micProcessor = processor;
+  processor.onaudioprocess = (e) => {
+    if (!callState.active || callState.muted) return;
+    if (!callState.ws || callState.ws.readyState !== WebSocket.OPEN) return;
+    const input = e.inputBuffer.getChannelData(0);
+    const down = downsampleTo16k(input, ctx.sampleRate);
+    const pcm = floatTo16BitPCM(down);
+    const bytes = new Uint8Array(pcm.buffer);
+    sendCallEvent({
+      type: "input_audio_buffer.append",
+      audio: b64FromBytes(bytes),
+    });
+  };
+  const mute = ctx.createGain();
+  mute.gain.value = 0;
+  source.connect(processor);
+  processor.connect(mute);
+  mute.connect(ctx.destination);
+}
+
+function stopMicToCall() {
+  try {
+    callState.micProcessor?.disconnect();
+  } catch {
+    /* ignore */
+  }
+  try {
+    callState.micSource?.disconnect();
+  } catch {
+    /* ignore */
+  }
+  try {
+    callState.micCtx?.close();
+  } catch {
+    /* ignore */
+  }
+  callState.micProcessor = null;
+  callState.micSource = null;
+  callState.micCtx = null;
+  if (callState.stream) {
+    for (const t of callState.stream.getTracks()) t.stop();
+    callState.stream = null;
+  }
+}
+
+async function persistCallNotes() {
+  if (!state.currentId || !callState.notes.length) return;
+  try {
+    await api(`/api/sessions/${state.currentId}/call-notes`, {
+      method: "POST",
+      body: JSON.stringify({ messages: callState.notes }),
+    });
+    const data = await api(`/api/sessions/${state.currentId}`);
+    renderMessages(data.session.messages || []);
+    await refreshSessions();
+  } catch (err) {
+    console.warn("保存通话记录失败", err);
+  }
+}
+
+async function endCall() {
+  if (!callState.active && !callState.ws) {
+    callOverlay?.classList.add("hidden");
+    callOverlay?.setAttribute("aria-hidden", "true");
+    return;
+  }
+  callState.active = false;
+  if (callState.timerId) {
+    clearInterval(callState.timerId);
+    callState.timerId = null;
+  }
+  stopCallPlayback();
+  stopMicToCall();
+  try {
+    callState.playCtx?.close();
+  } catch {
+    /* ignore */
+  }
+  callState.playCtx = null;
+  if (callState.ws) {
+    try {
+      callState.ws.close();
+    } catch {
+      /* ignore */
+    }
+    callState.ws = null;
+  }
+  await persistCallNotes();
+  callState.notes = [];
+  callState.userPartial = "";
+  callState.assistantPartial = "";
+  callState.userBubble = null;
+  callState.assistantBubble = null;
+  callState.muted = false;
+  if (callMuteBtn) {
+    callMuteBtn.classList.remove("on");
+    callMuteBtn.textContent = "🔇 静音";
+  }
+  callOverlay?.classList.add("hidden");
+  callOverlay?.setAttribute("aria-hidden", "true");
+  setCallStatus("已挂断");
+}
+
+function handleCallServerEvent(evt) {
+  const type = evt?.type;
+  if (!type) return;
+  if (type === "client.status") {
+    if (evt.status === "ready") setCallStatus("请开始说话");
+    else if (evt.status === "connecting") setCallStatus("正在接通…");
+    return;
+  }
+  if (type === "client.error") {
+    setCallStatus(evt.message || "通话出错");
+    return;
+  }
+  if (type === "error") {
+    setCallStatus(evt.error?.message || evt.message || "服务错误");
+    return;
+  }
+  if (type === "session.updated") {
+    setCallStatus("请开始说话");
+    return;
+  }
+  if (type === "input_audio_buffer.speech_started") {
+    stopCallPlayback();
+    setCallStatus("正在听…");
+    callState.assistantPartial = "";
+    callState.assistantBubble = null;
+    return;
+  }
+  if (type === "input_audio_buffer.speech_stopped") {
+    setCallStatus("思考中…");
+    return;
+  }
+  if (type === "conversation.item.input_audio_transcription.delta") {
+    const d = evt.delta || evt.text || "";
+    callState.userPartial += d;
+    appendCallLine("user", callState.userPartial, { replace: true });
+    return;
+  }
+  if (type === "conversation.item.input_audio_transcription.completed") {
+    const text = (evt.transcript || callState.userPartial || "").trim();
+    callState.userPartial = "";
+    if (text) {
+      appendCallLine("user", text, { replace: true });
+      callState.notes.push({ role: "user", content: text });
+    }
+    callState.userBubble = null;
+    return;
+  }
+  if (type === "response.created") {
+    setCallStatus("助手回复中…");
+    callState.assistantPartial = "";
+    return;
+  }
+  if (type === "response.audio_transcript.delta" || type === "response.text.delta") {
+    callState.assistantPartial += evt.delta || "";
+    appendCallLine("assistant", callState.assistantPartial, { replace: true });
+    return;
+  }
+  if (type === "response.audio_transcript.done") {
+    const text = (evt.transcript || callState.assistantPartial || "").trim();
+    if (text) {
+      appendCallLine("assistant", text, { replace: true });
+      callState.notes.push({ role: "assistant", content: text });
+    }
+    callState.assistantPartial = "";
+    callState.assistantBubble = null;
+    return;
+  }
+  if (type === "response.audio.delta") {
+    if (evt.delta) enqueueCallPcm(bytesFromB64(evt.delta));
+    return;
+  }
+  if (type === "response.done") {
+    setCallStatus("请继续说…");
+  }
+}
+
+async function startCall() {
+  if (callState.active) return;
+  if (!window.isSecureContext && location.hostname !== "localhost") {
+    alert("打电话模式需要 HTTPS 安全环境才能使用麦克风。请使用 https://101.201.237.149.sslip.io");
+    return;
+  }
+  if (!navigator.mediaDevices?.getUserMedia) {
+    alert("当前浏览器不支持麦克风通话");
+    return;
+  }
+  if (state.sending && chatAbort) chatAbort.abort();
+  stopCurrentAudio();
+
+  if (!state.currentId) await createSession();
+
+  callState.active = true;
+  callState.notes = [];
+  callState.userPartial = "";
+  callState.assistantPartial = "";
+  callState.userBubble = null;
+  callState.assistantBubble = null;
+  callState.muted = false;
+  if (callTranscriptEl) callTranscriptEl.innerHTML = "";
+  if (callMuteBtn) {
+    callMuteBtn.classList.remove("on");
+    callMuteBtn.textContent = "🔇 静音";
+  }
+  callOverlay?.classList.remove("hidden");
+  callOverlay?.setAttribute("aria-hidden", "false");
+  setCallStatus("正在接通…");
+  callState.startedAt = Date.now();
+  if (callTimerEl) callTimerEl.textContent = "00:00";
+  callState.timerId = setInterval(() => {
+    if (callTimerEl) callTimerEl.textContent = fmtCallTimer(Date.now() - callState.startedAt);
+  }, 500);
+
+  const proto = location.protocol === "https:" ? "wss:" : "ws:";
+  const ws = new WebSocket(
+    `${proto}//${location.host}/api/call/ws?token=${encodeURIComponent(state.token)}`
+  );
+  callState.ws = ws;
+
+  ws.onmessage = (ev) => {
+    let evt;
+    try {
+      evt = JSON.parse(ev.data);
+    } catch {
+      return;
+    }
+    handleCallServerEvent(evt);
+  };
+  ws.onerror = () => setCallStatus("连接异常");
+  ws.onclose = () => {
+    if (callState.active) {
+      setCallStatus("通话已断开");
+      endCall();
+    }
+  };
+
+  try {
+    await new Promise((resolve, reject) => {
+      const t = setTimeout(() => reject(new Error("连接超时")), 15000);
+      ws.addEventListener(
+        "open",
+        () => {
+          clearTimeout(t);
+          resolve();
+        },
+        { once: true }
+      );
+      ws.addEventListener(
+        "error",
+        () => {
+          clearTimeout(t);
+          reject(new Error("无法连接通话服务"));
+        },
+        { once: true }
+      );
+    });
+    await startMicToCall();
+    setCallStatus("已接通，请说话");
+  } catch (err) {
+    setCallStatus(err.message || "接通失败");
+    await endCall();
+  }
+}
+
+callBtn?.addEventListener("click", () => {
+  startCall();
+});
+callHangBtn?.addEventListener("click", () => {
+  endCall();
+});
+callMuteBtn?.addEventListener("click", () => {
+  callState.muted = !callState.muted;
+  callMuteBtn.classList.toggle("on", callState.muted);
+  callMuteBtn.textContent = callState.muted ? "🎤 取消静音" : "🔇 静音";
+  setCallStatus(callState.muted ? "已静音" : "请继续说…");
+});
+
 init();

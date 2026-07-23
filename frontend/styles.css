@@ -369,6 +369,173 @@ body {
 .btn-auto-tts.on .lbl {
   color: white;
 }
+.btn-call {
+  appearance: none;
+  border: 1.5px solid rgba(0, 194, 255, 0.35);
+  background: linear-gradient(135deg, rgba(0, 194, 255, 0.12), rgba(0, 229, 160, 0.16));
+  min-width: 64px;
+  height: 40px;
+  padding: 0 10px;
+  border-radius: 12px;
+  cursor: pointer;
+  font-size: 0.85rem;
+  font-weight: 800;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  color: #0b6e86;
+  transition: transform 0.15s, box-shadow 0.15s;
+}
+.btn-call .ico { font-size: 1rem; }
+.btn-call .lbl { letter-spacing: 0.02em; }
+.btn-call:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 6px 16px rgba(0, 180, 200, 0.22);
+}
+
+.call-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: grid;
+  place-items: center;
+  padding: 20px 16px;
+}
+.call-overlay.hidden { display: none !important; }
+.call-bg {
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(900px 500px at 20% 10%, rgba(0, 194, 255, 0.45), transparent 55%),
+    radial-gradient(700px 480px at 90% 80%, rgba(0, 229, 160, 0.35), transparent 50%),
+    linear-gradient(165deg, #073447 0%, #0b5a6e 45%, #0a3d4d 100%);
+}
+.call-panel {
+  position: relative;
+  width: min(420px, 100%);
+  min-height: min(640px, 92dvh);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 28px 20px 24px;
+  color: #f4fbff;
+  animation: popIn 0.35s ease both;
+}
+.call-brand {
+  margin: 0;
+  font-size: 0.95rem;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  opacity: 0.92;
+}
+.call-avatar {
+  margin-top: 28px;
+  width: 112px;
+  height: 112px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  font-size: 2.4rem;
+  font-weight: 800;
+  color: #073447;
+  background: linear-gradient(145deg, #7dffc4, #5ce1ff);
+  box-shadow: 0 0 0 0 rgba(92, 225, 255, 0.45);
+  animation: callPulse 2.2s ease-in-out infinite;
+}
+.call-avatar.speaking {
+  animation: callPulseSpeak 1.1s ease-in-out infinite;
+}
+@keyframes callPulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(92, 225, 255, 0.35); }
+  50% { box-shadow: 0 0 0 18px rgba(92, 225, 255, 0); }
+}
+@keyframes callPulseSpeak {
+  0%, 100% { transform: scale(1); box-shadow: 0 0 0 6px rgba(125, 255, 196, 0.25); }
+  50% { transform: scale(1.04); box-shadow: 0 0 0 20px rgba(125, 255, 196, 0); }
+}
+.call-status {
+  margin: 22px 0 0;
+  font-size: 1.15rem;
+  font-weight: 700;
+}
+.call-timer {
+  margin: 8px 0 0;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.75;
+  font-size: 0.95rem;
+}
+.call-transcript {
+  margin-top: 22px;
+  width: 100%;
+  flex: 1;
+  min-height: 140px;
+  max-height: 42vh;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  padding: 12px 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.call-line {
+  max-width: 92%;
+  padding: 10px 12px;
+  border-radius: 14px;
+  font-size: 0.92rem;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.call-line.user {
+  align-self: flex-end;
+  background: rgba(255, 255, 255, 0.16);
+}
+.call-line.assistant {
+  align-self: flex-start;
+  background: rgba(0, 0, 0, 0.22);
+}
+.call-actions {
+  margin-top: auto;
+  padding-top: 18px;
+  display: flex;
+  gap: 16px;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+}
+.call-btn {
+  appearance: none;
+  border: none;
+  cursor: pointer;
+  font-family: inherit;
+  font-weight: 800;
+  transition: transform 0.15s, opacity 0.15s;
+}
+.call-btn:active { transform: scale(0.96); }
+.call-btn.mute {
+  min-width: 96px;
+  height: 48px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.14);
+  color: #f4fbff;
+  font-size: 0.92rem;
+}
+.call-btn.mute.on {
+  background: rgba(255, 176, 32, 0.35);
+  color: #ffe9b8;
+}
+.call-btn.hang {
+  width: 72px;
+  height: 72px;
+  border-radius: 50%;
+  background: linear-gradient(145deg, #ff5a7a, #e11d48);
+  color: white;
+  font-size: 1rem;
+  box-shadow: 0 10px 28px rgba(225, 29, 72, 0.4);
+}
+
 .btn-menu {
   display: grid;
   place-items: center;
@@ -756,6 +923,7 @@ body {
   .chat-top { padding: 12px 20px; grid-template-columns: 44px minmax(0, 1fr) auto; }
   .btn-icon { width: 52px; }
   .btn-auto-tts { min-height: 44px; height: 44px; border-radius: 14px; }
+  .btn-call { min-height: 44px; height: 44px; border-radius: 14px; }
   .chat-title { font-size: 1.08rem; }
 }
 
