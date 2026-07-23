@@ -55,6 +55,7 @@ let recordChunks = [];
 let currentAudio = null;
 let sharedAudio = null; // 复用同一 Audio，避免自动播报被浏览器拦截
 let audioUnlocked = false;
+let ttsPlayToken = 0;
 let chatAbort = null;
 let recordMode = "none"; // mediarecorder | wav
 let audioCtx = null;
@@ -131,6 +132,7 @@ function attachTtsButton(bubble) {
 }
 
 function stopCurrentAudio() {
+  ttsPlayToken += 1; // 取消进行中的分句播放队列
   if (currentAudio) {
     try {
       currentAudio.pause();
@@ -184,6 +186,117 @@ async function unlockAudioPlayback() {
   }
 }
 
+function stripTextForSpeech(text) {
+  return String(text || "")
+    .replace(/```[\s\S]*?```/g, " ")
+    .replace(/`[^`]+`/g, " ")
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, " ")
+    .replace(/\[[^\]]*\]\([^)]*\)/g, " ")
+    .replace(/^#{1,6}\s+/gm, "")
+    .replace(/^\s*[-*+]\s+/gm, "")
+    .replace(/^\s*\d+\.\s+/gm, "")
+    .replace(/[*_]{1,3}/g, "")
+    .replace(/^>\s+/gm, "")
+    .replace(/[#>*`|_]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function splitSpeechSegments(text, maxChars = 72) {
+  const clean = stripTextForSpeech(text);
+  if (!clean) return [];
+  const parts = [];
+  let buf = "";
+  for (const ch of clean) {
+    buf += ch;
+    const atBreak = "。！？；!?.;".includes(ch);
+    if ((atBreak || buf.length >= maxChars) && buf.trim()) {
+      parts.push(buf.trim());
+      buf = "";
+    }
+  }
+  if (buf.trim()) parts.push(buf.trim());
+  const merged = [];
+  for (const seg of parts) {
+    const prev = merged[merged.length - 1];
+    if (prev && prev.length < 12 && !"。！？!?.;".includes(prev.slice(-1))) {
+      merged[merged.length - 1] += seg;
+    } else {
+      merged.push(seg);
+    }
+  }
+  return merged;
+}
+
+function firstSpeechSentence(text) {
+  const segs = splitSpeechSegments(text, 72);
+  return segs[0] || "";
+}
+
+async function fetchTtsBlob(text) {
+  const t0 = performance.now();
+  const res = await fetch("/api/tts", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${state.token}`,
+    },
+    body: JSON.stringify({ text }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    let msg = err.detail || `语音合成失败 ${res.status}`;
+    if (Array.isArray(msg)) msg = msg.map((x) => x.msg || JSON.stringify(x)).join("；");
+    throw new Error(msg);
+  }
+  const blob = await res.blob();
+  const timing = {
+    chars: Number(res.headers.get("X-TTS-Chars") || 0),
+    synthMs: Number(res.headers.get("X-TTS-Synth-Ms") || 0),
+    downloadMs: Number(res.headers.get("X-TTS-Download-Ms") || 0),
+    totalMs: Number(res.headers.get("X-TTS-Total-Ms") || 0),
+    networkMs: Math.round(performance.now() - t0),
+  };
+  console.debug("[tts]", timing, text.slice(0, 24));
+  return { blob, timing };
+}
+
+function playBlob(blob) {
+  return new Promise((resolve, reject) => {
+    if (!sharedAudio) sharedAudio = new Audio();
+    const audio = sharedAudio;
+    const url = URL.createObjectURL(blob);
+    const cleanup = () => {
+      try {
+        URL.revokeObjectURL(url);
+      } catch {
+        /* ignore */
+      }
+    };
+    audio.onended = null;
+    audio.onerror = null;
+    audio.src = url;
+    audio.volume = 1;
+    currentAudio = audio;
+    audio.onended = () => {
+      if (currentAudio === audio) currentAudio = null;
+      cleanup();
+      resolve();
+    };
+    audio.onerror = () => {
+      if (currentAudio === audio) currentAudio = null;
+      cleanup();
+      reject(new Error("语音播放失败"));
+    };
+    audio.play().then(() => {
+      audioUnlocked = true;
+    }).catch((err) => {
+      cleanup();
+      reject(err);
+    });
+  });
+}
+
 function maybeAutoPlayTts(bubble) {
   if (!state.autoTts || !bubble) return;
   const text = (bubble.dataset.rawText || "").trim();
@@ -192,8 +305,25 @@ function maybeAutoPlayTts(bubble) {
   if (!bubble.querySelector(".btn-tts")) attachTtsButton(bubble);
   const ttsBtn = bubble.querySelector(".btn-tts");
   if (!ttsBtn) return;
-  // 立刻排队，不额外拖长手势失效窗口；合成请求异步进行
   playTts(bubble, ttsBtn, { auto: true });
+}
+
+function prefetchFirstSentence(bubble, text) {
+  if (!state.autoTts || !bubble) return;
+  const first = firstSpeechSentence(text);
+  if (!first || first.length < 6) return;
+  if (bubble.dataset.ttsPrefetch === first) return;
+  bubble.dataset.ttsPrefetch = first;
+  const p = fetchTtsBlob(first)
+    .then((r) => {
+      bubble._ttsPrefetch = { text: first, blob: r.blob, timing: r.timing };
+      return r;
+    })
+    .catch((err) => {
+      console.debug("[tts] prefetch failed", err);
+      bubble._ttsPrefetch = null;
+    });
+  bubble._ttsPrefetchPromise = p;
 }
 
 async function playTts(bubble, btn, { auto = false } = {}) {
@@ -206,48 +336,48 @@ async function playTts(bubble, btn, { auto = false } = {}) {
   }
 
   stopCurrentAudio();
+  const token = ttsPlayToken;
   btn.classList.add("loading");
   btn.textContent = "…";
   try {
     if (auto && !audioUnlocked) {
       await unlockAudioPlayback();
     }
-    let audioUrl = bubble.dataset.ttsUrl;
-    if (!audioUrl) {
-      const data = await api("/api/tts", {
-        method: "POST",
-        body: JSON.stringify({ text }),
-      });
-      audioUrl = `data:${data.mime || "audio/mpeg"};base64,${data.audio}`;
-      bubble.dataset.ttsUrl = audioUrl;
-    }
-    if (!sharedAudio) sharedAudio = new Audio();
-    const audio = sharedAudio;
-    // 换源前清掉旧监听，避免串台
-    audio.onended = null;
-    audio.onerror = null;
-    audio.src = audioUrl;
-    audio.volume = 1;
-    currentAudio = audio;
+    const segments = splitSpeechSegments(text);
+    if (!segments.length) return;
+
     btn.classList.remove("loading");
     btn.classList.add("playing");
     btn.textContent = "⏸";
-    audio.onended = () => {
-      if (currentAudio === audio) currentAudio = null;
-      btn.classList.remove("playing");
-      btn.textContent = "🔊";
-    };
-    audio.onerror = () => {
-      stopCurrentAudio();
-      if (!auto) alert("语音播放失败");
-    };
-    await audio.play();
-    audioUnlocked = true;
+
+    // 首句若已在流式阶段预取，直接用
+    let nextFetch = null;
+    const pref = bubble._ttsPrefetch;
+    if (pref && pref.text === segments[0] && pref.blob) {
+      nextFetch = Promise.resolve({ blob: pref.blob, timing: pref.timing || {} });
+    } else if (bubble._ttsPrefetchPromise && bubble.dataset.ttsPrefetch === segments[0]) {
+      nextFetch = bubble._ttsPrefetchPromise.then((r) => {
+        if (r?.blob) return r;
+        return fetchTtsBlob(segments[0]);
+      });
+    } else {
+      nextFetch = fetchTtsBlob(segments[0]);
+    }
+
+    for (let i = 0; i < segments.length; i++) {
+      if (token !== ttsPlayToken) return;
+      const current = await nextFetch;
+      if (token !== ttsPlayToken) return;
+      if (i + 1 < segments.length) {
+        nextFetch = fetchTtsBlob(segments[i + 1]); // 播放当前句时预取下一句
+      }
+      await playBlob(current.blob);
+    }
   } catch (err) {
+    if (token !== ttsPlayToken) return;
     btn.classList.remove("loading", "playing");
     btn.textContent = "🔊";
     if (auto && (err?.name === "NotAllowedError" || /interact|user gesture|not allowed/i.test(String(err?.message || "")))) {
-      // 自动播报被拦截：提示一次并关掉自动，避免静默失败
       state.autoTts = false;
       localStorage.setItem("grape_auto_tts", "0");
       syncAutoTtsButton();
@@ -255,6 +385,11 @@ async function playTts(bubble, btn, { auto = false } = {}) {
       return;
     }
     if (!auto) alert(err.message || "语音合成失败");
+  } finally {
+    if (token === ttsPlayToken) {
+      btn.classList.remove("loading", "playing");
+      btn.textContent = "🔊";
+    }
   }
 }
 
@@ -1272,6 +1407,10 @@ async function sendMessage() {
             finalText = payload.text;
           } else {
             finalText += payload.text;
+          }
+          // 自动播报：首句一完整就开始后台合成，缩短“说完才等 TTS”的空窗
+          if (state.autoTts && /[。！？!?]/.test(finalText)) {
+            prefetchFirstSentence(bubble, finalText);
           }
           const now = Date.now();
           if (now - lastRender > 40) {

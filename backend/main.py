@@ -14,7 +14,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, Header, HTTPException
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -252,15 +252,23 @@ def asr(body: AsrBody, authorization: str | None = Header(default=None)):
 def tts(body: TtsBody, authorization: str | None = Header(default=None)):
     _auth_user(authorization)
     try:
-        audio, mime = tts_synthesize(body.text)
+        audio, mime, timing = tts_synthesize(body.text)
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
     except Exception as e:  # noqa: BLE001
         raise HTTPException(502, f"语音合成失败：{e}") from e
-    return {
-        "mime": mime,
-        "audio": base64.b64encode(audio).decode("ascii"),
-    }
+    # 直接返回音频二进制，避免 base64 膨胀；前端可分句调用以降低首包延迟
+    return Response(
+        content=audio,
+        media_type=mime,
+        headers={
+            "Cache-Control": "no-store",
+            "X-TTS-Chars": str(timing.get("chars", 0)),
+            "X-TTS-Synth-Ms": str(timing.get("synth_ms", 0)),
+            "X-TTS-Download-Ms": str(timing.get("download_ms", 0)),
+            "X-TTS-Total-Ms": str(timing.get("total_ms", 0)),
+        },
+    )
 
 
 @app.post("/api/sessions/{session_id}/chat")

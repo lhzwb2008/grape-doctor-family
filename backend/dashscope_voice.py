@@ -6,6 +6,7 @@ import base64
 import json
 import os
 import re
+import time
 import urllib.error
 import urllib.request
 from typing import Any
@@ -52,6 +53,13 @@ def tts_sample_rate() -> int:
         return int(_env("DASHSCOPE_TTS_SAMPLE_RATE", "24000"))
     except ValueError:
         return 24000
+
+
+def tts_rate() -> float:
+    try:
+        return float(_env("DASHSCOPE_TTS_RATE", "1.1"))
+    except ValueError:
+        return 1.1
 
 
 def _http_post(url: str, body: dict[str, Any], *, timeout: float = 90) -> dict[str, Any]:
@@ -136,13 +144,48 @@ def strip_for_speech(text: str) -> str:
     return t
 
 
-def synthesize(text: str) -> tuple[bytes, str]:
-    """文本转语音，返回 (audio_bytes, mime)。"""
+def split_speech_segments(text: str, *, max_chars: int = 72) -> list[str]:
+    """按句拆分，控制单段长度，降低首包等待。"""
+    clean = strip_for_speech(text)
+    if not clean:
+        return []
+    parts: list[str] = []
+    buf: list[str] = []
+    for ch in clean:
+        buf.append(ch)
+        joined = "".join(buf)
+        at_break = ch in "。！？；!?.;\n"
+        too_long = len(joined) >= max_chars
+        if at_break or too_long:
+            seg = joined.strip()
+            if seg:
+                parts.append(seg)
+            buf = []
+    tail = "".join(buf).strip()
+    if tail:
+        parts.append(tail)
+    # 合并过碎且未收尾的片段，避免把完整短句和下句粘在一起
+    merged: list[str] = []
+    for seg in parts:
+        if (
+            merged
+            and len(merged[-1]) < 12
+            and merged[-1][-1] not in "。！？!?.;"
+        ):
+            merged[-1] = f"{merged[-1]}{seg}"
+        else:
+            merged.append(seg)
+    return merged
+
+
+def synthesize(text: str) -> tuple[bytes, str, dict[str, float | int]]:
+    """文本转语音，返回 (audio_bytes, mime, timing)。"""
     clean = strip_for_speech(text)
     if not clean:
         raise ValueError("没有可朗读的文本")
-    if len(clean) > 2000:
-        clean = clean[:2000]
+    if len(clean) > 500:
+        # 单次请求限制更短，鼓励前端分句；后端兜底截断
+        clean = clean[:500]
 
     url = f"{base_url()}/api/v1/services/audio/tts/SpeechSynthesizer"
     body: dict[str, Any] = {
@@ -152,22 +195,36 @@ def synthesize(text: str) -> tuple[bytes, str]:
             "voice": tts_voice(),
             "format": tts_format(),
             "sample_rate": tts_sample_rate(),
-            "rate": 1.0,
+            "rate": float(tts_rate()),
         },
     }
+    t0 = time.perf_counter()
     data = _http_post(url, body, timeout=90)
+    t1 = time.perf_counter()
     audio = (data.get("output") or {}).get("audio") or {}
     audio_url = audio.get("url")
     if audio_url:
         raw = _download(audio_url)
+        t2 = time.perf_counter()
     else:
-        # 部分接口直接返回 base64
-        b64 = audio.get("data") or data.get("output", {}).get("audio")
+        b64 = audio.get("data")
         if isinstance(b64, str) and b64:
             raw = base64.b64decode(b64)
+            t2 = time.perf_counter()
         else:
             raise RuntimeError(f"TTS 响应缺少音频: {json.dumps(data, ensure_ascii=False)[:400]}")
 
     fmt = (tts_format() or "mp3").lower()
     mime = "audio/mpeg" if fmt == "mp3" else f"audio/{fmt}"
-    return raw, mime
+    timing = {
+        "chars": len(clean),
+        "synth_ms": int((t1 - t0) * 1000),
+        "download_ms": int((t2 - t1) * 1000),
+        "total_ms": int((t2 - t0) * 1000),
+    }
+    print(
+        f"[tts] chars={timing['chars']} synth_ms={timing['synth_ms']} "
+        f"download_ms={timing['download_ms']} bytes={len(raw)}",
+        flush=True,
+    )
+    return raw, mime, timing
